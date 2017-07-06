@@ -9,7 +9,8 @@ for arch in amd64 386; do
 done
 for os in darwin linux; do
   for arch in amd64 386; do
-  GOOS=$os GOARCH=$arch go build -o sesam main.go
-  tar -zcf dist/sesam$TAG.$os-$arch.tar.gz sesam
-  rm sesam
+    GOOS=$os GOARCH=$arch go build -o sesam main.go
+    tar -zcf dist/sesam$TAG.$os-$arch.tar.gz sesam
+    rm sesam
+  done
 done
