@@ -1,19 +1,16 @@
 language: go
 go: 1.8.3
-env:
-    - GIMME_OS=linux GIMME_ARCH=amd64
-    - GIMME_OS=darwin GIMME_ARCH=amd64
-    - GIMME_OS=windows GIMME_ARCH=amd64
 install:
     - go get -d -v ./...
 script:
-    - go build -v ./...
+    - make.sh
 deploy:
   provider: releases
   api_key:
     secure: QCs9B/rjdIW5gzmjLQLYx1Mz26XULKEVlsEvAgE2CD2oxBWswgaeBZcnMaRtZ0AQEBYcPJr6qOVs8Pnwvjpag1/HDqKhGW4G4dIZ04lKZFsA3MME2zL3BG9K1vERXGRa54BdGuGYvFWV7wmN/Q1Hsqs2lieDrK2jbh6InO646Bn0A8bqUPXtZYUEfVVO4YRSpkDV1uwS9eOnBEimmN1UtKeGYQIcfvf3557sWDARHjFPe04QTyHxUbscHBpAb8tKaGm0/bMAtmdWT8PvXo/fmDupwfPUJcncsRKz5Oe04R1WxTflQfouaI3VkQgqZE3POk2eLh9778jOYHjVt+82kCf+UUKK+GB0/K7PhtH0snvl8XiMZwrPugiMTlYfShsPKGEM5DZFPvkoPhKCKLEd2puO0bbiqWg7/ZoCswmckVmaXirKyUd7RplBqSU9S0ul3tD0LR+zmfGGJ9DN8m092nBsioVoAm1xRRFbh1pcjqgmzVqWoKovUAdwDzhwTwgQQK/qaDS/2+J6m8k5RFQGjkNN98o2A4HoSOQMHJlpA2lDc4gleSZ0MSn8Q4JVBY4L7lZIahoFTFZkcirILW5g/IVPC6wxnwhwilIYARevgLQgrV+PnzKmN8B4IUceEqUGV+JDG+GrvflBUx0VQNuVDcl4e7nmKPRR55zwh8urOgg=
+  file_glob: true
   file: 
-    - sesam
+    - dist/*
   skip_cleanup: true
   on:
     repo: sesam-io/sesam
