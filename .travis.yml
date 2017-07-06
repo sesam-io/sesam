@@ -1,4 +1,5 @@
 language: go
+go: 1.8.3
 env:
     - GIMME_OS=linux GIMME_ARCH=amd64
     - GIMME_OS=darwin GIMME_ARCH=amd64
