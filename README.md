@@ -56,12 +56,12 @@ Verifying output (3/3)...passed!
 |------------|----------------------------------------------------------------------------|------------------|----------|-----------------------------------------------------------------------|
 | _id | Name of the test. | string | No | Name of the .test.json file |
 | type | Config type so that this later can just be part of the rest of the config. | String | No | test |
-| description | A description of test | string | No | |
-| ignore | If the output should be ignored during tests | boolean | No | false |
-| endpoint | If the output should be fetched from a published endpoint instead | string | No | By default the json is grabbed from ``/pipes/<my-pipe>/entities``
-| file | File that contains the expected results | string | No | Name of the .test.json file without .test (e.g. foo.test.json looks for foo.json)
-| blacklist | Which properties to ignore in the output. | Array of strings | No | [] |
-| parameters | Which parameters to pass as bound parameters. Note that parameters only works for published endpoints. TODO verify this. | Object | No | |
+| description | A description of the test. | string | No | |
+| ignore | If the output should be ignored during tests. | boolean | No | ``false`` |
+| endpoint | If the output should be fetched from a published endpoint instead. | string | No | By default the json is grabbed from ``/pipes/<my-pipe>/entities``
+| file | File that contains the expected results. | string | No | Name of the .test.json file without .test (e.g. foo.test.json looks for foo.json)
+| blacklist | Properties to ignore in the output. | Array of strings | No | ``[]`` |
+| parameters | Which parameters to pass as bound parameters. Note that parameters only works for published endpoints. | Object | No | ``{}`` |
 
 Example: 
 ```
@@ -70,7 +70,7 @@ $ cat foo.test.json
   "_id": "foo",
   "type": "test",
   "file": "foo.json"
-  "blacklist": ["my-timestamp"],
+  "blacklist": ["my-last-updated-ts"],
   "ignore": false
 }
 ```
@@ -119,6 +119,27 @@ Example:
 }
 ```
 This will compare the output of ``/publishers/foo/xml`` with the contents of ``foo.xml``.
+
+### Blacklisting
+
+If the data contains values that are not deterministic (e.g. timestamp added during the run) they can be filtered out using the blacklist.
+ 
+Example:
+```
+{
+  "_id": "foo",
+  "type": "test",
+  "blacklist": ["foo", "ns1:bar"]
+}
+```
+
+This will filter out properties called ``foo`` and ``ns1:bar`` (namespaced).
+ 
+If the data is not located at the top level, a dotted notation is supported ``foo.bar``. This will remove the ``bar`` property from the object (or list of objects) located under the ``foo`` property. If you need to blacklist a property that actually contains a dot, the dot can be escaped like this ``foo\.bar``
+  
+### Avoid ignore and blacklist
+
+It is recommended to avoid ignoring or blacklisting as much as possible as this creates a false sense of correctness. Tests will pass, but deviations are silently ignored.
 
 ## Installing
 
