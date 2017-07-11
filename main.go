@@ -15,16 +15,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-	"sort"
 	"reflect"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 func myUsage() {
 	fmt.Fprintf(os.Stderr, "usage: %s [options] <command>\n", os.Args[0])
 	text := `
 Commands:
+  init	    Store subscription token in current directory (not implemented yet)
   clean	    Clean the build folder
   upload    Replace node config with local config
   download  Replace local config with node config
@@ -65,7 +66,6 @@ func main() {
 
 	args := flag.Args()
 	if len(args) == 0 {
-		// TODO add sub command Usage
 		flag.Usage()
 		return
 	}
@@ -82,9 +82,10 @@ func main() {
 		err = status()
 	case "update":
 		err = update()
+	case "verify":
+
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
-		// TODO add sub command Usage
 		flag.Usage()
 	}
 	if err != nil {
@@ -94,13 +95,12 @@ func main() {
 }
 
 func update() error {
-	// TODO support updating just one dataset (flag?)
 	conn, err := connect()
 	if err != nil {
 		return err
 	}
 	if singlePipeFlag != "" {
-		err = updateExpectedResults(conn, &Pipe{Id: singlePipeFlag })
+		err = updateExpectedResults(conn, &Pipe{Id: singlePipeFlag})
 		if err != nil {
 			return fmt.Errorf("failed to test %s: %s", singlePipeFlag, err)
 		}
@@ -158,9 +158,9 @@ func (a byId) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byId) Less(i, j int) bool { return a[i]["_id"].(string) < a[j]["_id"].(string) }
 
 type testSpec struct {
-	Ignore    bool     `json:"ignore"`
-	Blacklist []string `json:"blacklist"`
-	File      string   `json:"file"`
+	Ignore            bool     `json:"ignore"`
+	Blacklist         []string `json:"blacklist"`
+	File              string   `json:"file"`
 	CompiledBlacklist []*regexp.Regexp
 }
 
@@ -190,14 +190,15 @@ func (spec testSpec) isBlacklisted(path []string) bool {
 	}
 	return false
 }
+
 // foo.bar -> foo\.bar
 // foo[].bar -> foo.*.bar
 func fixSyntax(i string) string {
 	// the jq implementation used foo[].bar syntax when foo was a dict of objects (typically keys to new objects)
 	i = strings.Replace(i, "[].", ".*.", -1)
 	// create a regex, foo.*.bar -> ^foo\..*\.bar (the alternative would be that the end user typed regex directly)
-	i = strings.Replace(i,".", "\\.", -1)
-	i = strings.Replace(i,"*", ".*", -1)
+	i = strings.Replace(i, ".", "\\.", -1)
+	i = strings.Replace(i, "*", ".*", -1)
 	return "^" + i
 }
 
@@ -217,12 +218,18 @@ func (spec *testSpec) compileBlacklist() error {
 func normalizeList(spec testSpec, entities []entity) []entity {
 	var result []entity
 	for _, entity := range entities {
-		result = append(result, normalize(spec, entity, []string{}))
+		ctx := &normalizeContext{root: entity, spec: spec}
+		result = append(result, ctx.normalize(entity, []string{}))
 	}
 	return result
 }
 
-func normalize(spec testSpec, entity map[string]interface{}, parentPath []string) map[string]interface{} {
+type normalizeContext struct {
+	root entity
+	spec testSpec
+}
+
+func (ctx normalizeContext) normalize(entity map[string]interface{}, parentPath []string) map[string]interface{} {
 	result := make(map[string]interface{})
 	for key, value := range entity {
 		path := append(parentPath, key)
@@ -231,18 +238,19 @@ func normalize(spec testSpec, entity map[string]interface{}, parentPath []string
 		} else if strings.HasPrefix(key, "_") {
 			// ignore the other internal attributes
 		} else {
-			if !spec.isBlacklisted(path) {
-				result[key] = normalizeValue(spec, value, path)
+			if !ctx.spec.isBlacklisted(path) {
+				result[key] = ctx.normalizeValue(value, path)
 			} else {
 				if verboseFlag {
-					log.Printf("Ignoring blacklisted path: %s", path)
+					log.Printf("_id %s: ignoring blacklisted path: %v ", ctx.root["_id"], path)
 				}
 			}
 		}
 	}
 	return result
 }
-func normalizeValue(spec testSpec, v interface{}, path []string) interface{} {
+
+func (ctx normalizeContext) normalizeValue(v interface{}, path []string) interface{} {
 	if v == nil {
 		return v
 	}
@@ -253,11 +261,11 @@ func normalizeValue(spec testSpec, v interface{}, path []string) interface{} {
 	case reflect.Array:
 		var fixed []interface{}
 		for _, e := range v.([]interface{}) {
-			fixed = append(fixed, normalizeValue(spec, e, path))
+			fixed = append(fixed, ctx.normalizeValue(e, path))
 		}
 		return fixed
 	case reflect.Map:
-		return normalize(spec, v.(map[string]interface{}), path)
+		return ctx.normalize(v.(map[string]interface{}), path)
 	default:
 		return v
 	}
