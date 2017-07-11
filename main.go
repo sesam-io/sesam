@@ -15,13 +15,8 @@ import (
 	"io"
 	"os/exec"
 	"io/ioutil"
+	"encoding/json"
 )
-
-var Version string
-var verboseFlag bool
-var nodeFlag string
-var jwtFlag string
-const buildDir = "build"
 
 func myUsage() {
 	fmt.Fprintf(os.Stderr,"usage: %s [options] <command>\n", os.Args[0])
@@ -42,11 +37,20 @@ Options:
 	flag.PrintDefaults()
 }
 
+var Version string
+
+var verboseFlag bool
+var nodeFlag string
+var jwtFlag string
+var singlePipeFlag string
+const buildDir = "build"
+
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
 	flag.StringVar(&nodeFlag,"node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
+	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
@@ -72,6 +76,8 @@ func main() {
 		err = download()
 	case "status":
 		err = status()
+	case "update":
+		err = update()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		// TODO add sub command Usage
@@ -81,6 +87,107 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s failed: %s\n", command, err)
 		os.Exit(1)
 	}
+}
+
+func update() error {
+	// TODO support updating just one dataset (flag?)
+	conn, err := connect()
+	if err != nil {
+		return err
+	}
+	if singlePipeFlag != "" {
+		//updateExpectedResults(conn, &Pipe{Id: singlePipeFlag })
+	} else {
+		var pipes []Pipe
+		err := conn.getPipes(&pipes)
+		if err != nil {
+			return fmt.Errorf("failed to get list of pipes: %s", err)
+		}
+		for _, pipe := range pipes {
+			if pipe.getPipeType() == OutputPipe {
+				err = updateExpectedResults(conn, &pipe)
+				if err != nil {
+					return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func updateExpectedResults(conn *connection, pipe *Pipe) error {
+	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
+	err := loadSpec(pipe, &spec)
+	if err != nil {
+		return fmt.Errorf("failed to load testspec %s: %s", pipe.Id, err)
+	}
+	if spec.Ignore {
+		if verboseFlag {
+			log.Printf("Ignoring %s", pipe.Id)
+		}
+		return nil
+	}
+	var entities []map[string]interface{}
+	err = conn.getEntities(pipe, &entities)
+	if err != nil {
+		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
+	}
+	entities = normalizeList(spec, entities)
+	bytes, _ := json.MarshalIndent(entities, "", "  ")
+	err = ioutil.WriteFile("expected/" + spec.File, bytes, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
+	}
+	return nil
+}
+
+type testSpec struct {
+	Ignore bool `json:"ignore"`
+	Blacklist []string `json:"blacklist"`
+	File string `json:"file"`
+}
+
+func loadSpec(pipe *Pipe, spec *testSpec) error {
+	file := fmt.Sprintf("./expected/%s.test.json", pipe.Id)
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		raw, err := ioutil.ReadFile(file)
+		if err != nil {
+			return err
+		}
+		json.Unmarshal(raw, spec)
+	}
+	// file is optional, defaults applies
+	return nil
+}
+
+func normalizeList(spec testSpec, entities []map[string]interface{}) []map[string]interface{} {
+	var result []map[string]interface{}
+	for _, entity := range entities {
+		result = append(result, normalize(spec, entity))
+	}
+	return result
+}
+func normalize(spec testSpec, entity map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	for key, value := range entity {
+		// TODO recurse if value is object, keep path so that blacklist works
+		if key == "_id" || key == "_deleted" {
+			result[key] = value
+		} else if strings.HasPrefix(key, "_") {
+			// ignore the other internal attributes
+		} else if !spec.isBlacklisted(key) {
+			result[key] = value
+		}
+	}
+	return result
+}
+func (spec testSpec) isBlacklisted(key string) bool {
+	for _, s := range spec.Blacklist {
+		if s == key {
+			return true
+		}
+	}
+	return false
 }
 
 func download() error {
@@ -97,7 +204,7 @@ func download() error {
 	err = conn.getZipConfig(tmp)
 
 	if err != nil {
-		return fmt.Errorf("failed to get zip conn, aborting: %s", err)
+		return fmt.Errorf("failed to get zip config, aborting: %s", err)
 	}
 
 	err = rmFiles(".", func(path string) bool {
@@ -107,7 +214,7 @@ func download() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Local conn replaced by node conn.\n")
+	fmt.Printf("Local config replaced by node config.\n")
 	return nil
 }
 
@@ -128,6 +235,7 @@ func clean() error {
 }
 
 func upload() error {
+	// TODO implement profile, default profile is test-env.json
 	conn, err := connect()
 	if err != nil {
 		return err
@@ -143,7 +251,7 @@ func upload() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Node conn replaced with local conn.\n")
+	fmt.Printf("Node config replaced with local config.\n")
 	return nil
 }
 
@@ -210,10 +318,10 @@ func status() error {
 	if err != nil {
 		fmt.Println(err)
 		fmt.Print(out.String())
-		fmt.Fprint(os.Stderr, "Node conn is NOT in sync with local conn.\n")
+		fmt.Fprint(os.Stderr, "Node config is NOT in sync with local config.\n")
 		return nil
 	}
-	fmt.Printf("Node conn is up-to-date with local conn.\n")
+	fmt.Printf("Node config is up-to-date with local config.\n")
 	return nil
 }
 
@@ -360,7 +468,6 @@ func loadSyncConfig() (*os.File, error) {
 	if err != nil {
 		return nil, errors.New(fmt.Sprintf("unable to open %s", config))
 	}
-	defer file.Close()
 	return file, nil
 }
 
@@ -376,7 +483,7 @@ func parseSyncConfig(r *parseResult, f *os.File) (error) {
 		if !strings.HasPrefix(line, "#") {
 			setting := strings.Split(line, "=")
 			if len(setting) != 2 {
-				return fmt.Errorf("invalid conn line: %s", line)
+				return fmt.Errorf("invalid config line: %s", line)
 			}
 			switch strings.ToLower(setting[0]) {
 			case "jwt":
@@ -384,7 +491,7 @@ func parseSyncConfig(r *parseResult, f *os.File) (error) {
 			case "node":
 				r.node = setting[1]
 			default:
-				return fmt.Errorf("unknown conn key: %s", setting[0])
+				return fmt.Errorf("unknown config key: %s", setting[0])
 			}
 		}
 	}
@@ -400,12 +507,13 @@ func coalesce(list []string) string {
 	return ""
 }
 
-// loads conn from .syncconfig in current directory if not overridden by env variables
+// loads connection from .syncconfig in current directory if not overridden by env variables
 // TODO should walk up path to find file?
 // TODO rename file to .sesam/config and use INI-style sections?
 func connect() (*connection, error) {
 	r := &parseResult{}
 	f, err := loadSyncConfig()
+	defer f.Close()
 	if err == nil {
 		// file exists
 		parseErr := parseSyncConfig(r, f)
@@ -429,6 +537,9 @@ func connect() (*connection, error) {
 func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	client := &http.Client{}
 	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", conn.Jwt))
+	if verboseFlag {
+		log.Printf("%v: %v\n", r.Method, r.URL)
+	}
 	resp, err := client.Do(r)
 	if err != nil {
 		return nil, fmt.Errorf("unable to do request: %v", err)
@@ -444,12 +555,69 @@ func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+type Pipetype int
+
+const (
+	InputPipe Pipetype = iota
+	InternalPipe
+	OutputPipe
+)
+
+func (p Pipe) getPipeType() Pipetype {
+	if p.Config.Effective.Source.Type == "embedded" {
+		return InputPipe
+	}
+	if p.Config.Effective.Sink.Type == "dataset" {
+		return InternalPipe
+	}
+	return OutputPipe
+}
+
+type PipeSource struct {
+	Type string `json:"type"`
+}
+
+type PipeSink struct {
+	Type string `json:"type"`
+}
+
+type PipeConfig struct {
+	Source PipeSource `json:"source"`
+	Sink PipeSink `json:"sink"`
+}
+
+type PipeConfigBlock struct {
+	Effective PipeConfig `json:"effective"`
+}
+
+type Pipe struct {
+	Id string `json:"_id"`
+	Config PipeConfigBlock `json:"config"`
+}
+
+func (conn *connection) getPipes(target *[]Pipe) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes", conn.Node), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+
 func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
 	reader := bufio.NewReader(zip)
 
-	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/conn?force=true", conn.Node), reader)
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/config?force=true", conn.Node), reader)
 	if err != nil {
-		// shouldn't happen if conn is sane
+		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
 	}
 	r.Header.Add("Content-Type", "application/zip")
@@ -462,9 +630,9 @@ func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
 }
 
 func (conn *connection) getZipConfig(dst *os.File) error {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/conn", conn.Node), nil)
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/config", conn.Node), nil)
 	if err != nil {
-		// shouldn't happen if conn is sane
+		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
 	}
 	r.Header.Add("Accept", "application/zip")
@@ -475,6 +643,22 @@ func (conn *connection) getZipConfig(dst *os.File) error {
 	}
 
 	defer resp.Body.Close()
-	io.Copy(dst, resp.Body)
-	return nil
+	_, err = io.Copy(dst, resp.Body)
+	return err
+}
+
+func (conn *connection) getEntities(pipe *Pipe, target *[]map[string]interface{}) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe.Id), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
 }
