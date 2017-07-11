@@ -17,23 +17,43 @@ import (
 	"io/ioutil"
 )
 
-var version string
-var verbose bool
+var Version string
+var verboseFlag bool
+var nodeFlag string
+var jwtFlag string
+const buildDir = "build"
+
+func myUsage() {
+	fmt.Fprintf(os.Stderr,"usage: %s [options] <command>\n", os.Args[0])
+	text := `
+Commands:
+  clean	    Clean the build folder
+  upload    Replace node config with local config
+  download  Replace local config with node config
+  status    Compare local config with node config
+  run	    Run configuration until it stabilizes (not implemented yet)
+  update    Update expected output with current output (not implemented yet)
+  verify    Compare current output with expected output (not implemented yet)
+  test      Upload, run and verify solution (not implemented yet)
+
+Options:
+`
+	fmt.Fprintf(os.Stderr, text)
+	flag.PrintDefaults()
+}
 
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
-	flag.BoolVar(&verbose, "v", false, "show more info")
-	// TODO use these as config
-	nodePtr := flag.String("node", "http://localhost:9042/api", "service url")
-	jwtPtr := flag.String("jwt", "", "authorization token")
+	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
+	flag.StringVar(&nodeFlag,"node", "", "service url")
+	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
+	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
 		// https://stackoverflow.com/questions/11354518/golang-application-auto-build-versioning
-		fmt.Printf("sesam version %s\n", version)
+		fmt.Printf("sesam version %s\n", Version)
 		return
 	}
-	_ = nodePtr
-	_ = jwtPtr
 
 	args := flag.Args()
 	if len(args) == 0 {
@@ -58,13 +78,13 @@ func main() {
 		flag.Usage()
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s command failed: %s\n", command, err)
+		fmt.Fprintf(os.Stderr, "%s failed: %s\n", command, err)
 		os.Exit(1)
 	}
 }
 
 func download() error {
-	config, err := loadConfig()
+	conn, err := connect()
 	if err != nil {
 		return err
 	}
@@ -74,10 +94,10 @@ func download() error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	err = getZipConfig(tmp, config)
+	err = conn.getZipConfig(tmp)
 
 	if err != nil {
-		return fmt.Errorf("failed to get zip config, aborting: %s", err)
+		return fmt.Errorf("failed to get zip conn, aborting: %s", err)
 	}
 
 	err = rmFiles(".", func(path string) bool {
@@ -87,18 +107,19 @@ func download() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Local config replaced by node config.\n")
+	fmt.Printf("Local conn replaced by node conn.\n")
 	return nil
 }
 
 
 func clean() error {
-	config, err := loadConfig()
+	_, err := connect()
 	if err != nil {
 		return err
 	}
+	// TODO wipe old config from node?
 
-	dir := filepath.Join(config.BuildDir)
+	dir := filepath.Join(buildDir)
 	err = os.RemoveAll(dir)
 	if err != nil {
 		return err
@@ -107,7 +128,7 @@ func clean() error {
 }
 
 func upload() error {
-	config, err := loadConfig()
+	conn, err := connect()
 	if err != nil {
 		return err
 	}
@@ -118,11 +139,11 @@ func upload() error {
 		return err
 	}
 
-	err = putZipConfig(buf, config)
+	err = conn.putZipConfig(buf)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Node config replaced with local config.\n")
+	fmt.Printf("Node conn replaced with local conn.\n")
 	return nil
 }
 
@@ -148,12 +169,12 @@ func prepDiff(path string, prepFunc prepDiffFunc) error {
 }
 
 func status() error {
-	config, err := loadConfig()
+	conn, err := connect()
 	if err != nil {
 		return err
 	}
 
-	dir := filepath.Join(config.BuildDir, "status")
+	dir := filepath.Join(buildDir, "status")
 	err = os.RemoveAll(dir)
 	if err != nil {
 		return err
@@ -175,7 +196,7 @@ func status() error {
 	node := filepath.Join(dir, "node")
 
 	err = prepDiff(node, func(dst *os.File) error {
-		return getZipConfig(dst, config)
+		return conn.getZipConfig(dst)
 	})
 	if err != nil {
 		return err
@@ -189,10 +210,10 @@ func status() error {
 	if err != nil {
 		fmt.Println(err)
 		fmt.Print(out.String())
-		fmt.Fprint(os.Stderr, "Node config is NOT in sync with local config.\n")
+		fmt.Fprint(os.Stderr, "Node conn is NOT in sync with local conn.\n")
 		return nil
 	}
-	fmt.Printf("Node config is up-to-date with local config.\n")
+	fmt.Printf("Node conn is up-to-date with local conn.\n")
 	return nil
 }
 
@@ -210,7 +231,7 @@ func rmFiles(dir string, matcher pathMatchFunc) error {
 		if err != nil {
 			return err
 		}
-		if verbose {
+		if verboseFlag {
 			log.Printf("Removed %s\n", path)
 		}
 		return nil
@@ -245,7 +266,7 @@ func zipDir(src string, matcher pathMatchFunc) (*bytes.Buffer, error) {
 		if err != nil {
 			return err
 		}
-		if verbose {
+		if verboseFlag {
 			log.Printf("Added %s (%d bytes written)\n", path, written)
 		}
 		return nil
@@ -311,8 +332,8 @@ func zipConfig() (*bytes.Buffer, error) {
 	})
 }
 
-type config struct {
-	Jwt, Node, BuildDir string
+type connection struct {
+	Jwt, Node string
 }
 
 func cleanJwt(token string) string {
@@ -333,49 +354,81 @@ func fixNodeUrl(url string) string {
 	}
 }
 
-// loads config from .syncconfig in current directory if not overridden by env variables
-// TODO should walk up path to find file?
-// TODO rename file to .sesam/config and use INI-style sections?
-func loadConfig() (*config, error) {
-	// for backwards compatibility
-	jwt := os.Getenv("JWT")
-	node := os.Getenv("NODE")
-	if jwt == "" || node == "" {
-		// load config file if missing env variables
-		config := ".syncconfig"
-		file, err := os.Open(config)
-		if err != nil {
-			return nil, errors.New(fmt.Sprintf("unable to open %s", config))
-		}
-		defer file.Close()
+func loadSyncConfig() (*os.File, error) {
+	config := ".syncconfig"
+	file, err := os.Open(config)
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("unable to open %s", config))
+	}
+	defer file.Close()
+	return file, nil
+}
 
-		// parse property-style
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "#") {
-				setting := strings.Split(line, "=")
-				if len(setting) != 2 {
-					return nil, fmt.Errorf("invalid config line: %s", line)
-				}
-				switch strings.ToLower(setting[0]) {
-				case "jwt":
-					jwt = setting[1]
-				case "node":
-					node = setting[1]
-				default:
-					return nil, fmt.Errorf("unknown config key: %s", setting[0])
-				}
+type parseResult struct {
+	jwt, node string
+}
+
+func parseSyncConfig(r *parseResult, f *os.File) (error) {
+	// parse property-style
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#") {
+			setting := strings.Split(line, "=")
+			if len(setting) != 2 {
+				return fmt.Errorf("invalid conn line: %s", line)
+			}
+			switch strings.ToLower(setting[0]) {
+			case "jwt":
+				r.jwt = setting[1]
+			case "node":
+				r.node = setting[1]
+			default:
+				return fmt.Errorf("unknown conn key: %s", setting[0])
 			}
 		}
 	}
-
-	return &config{Jwt: cleanJwt(jwt), Node: fixNodeUrl(node), BuildDir: "./build"}, nil
+	return nil
 }
 
-func doRequest(r *http.Request, config *config) (*http.Response, error) {
+func coalesce(list []string) string {
+	for _, v := range list {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// loads conn from .syncconfig in current directory if not overridden by env variables
+// TODO should walk up path to find file?
+// TODO rename file to .sesam/config and use INI-style sections?
+func connect() (*connection, error) {
+	r := &parseResult{}
+	f, err := loadSyncConfig()
+	if err == nil {
+		// file exists
+		parseErr := parseSyncConfig(r, f)
+		if parseErr != nil {
+			// fail if parse errors
+			return nil, parseErr
+		}
+	}
+	jwt := coalesce([]string{jwtFlag, os.Getenv("JWT"), r.jwt})
+	node := coalesce([]string{nodeFlag, os.Getenv("NODE"), r.node})
+
+	if jwt == "" || node == "" {
+		// still no valid config, lets tell the user that
+		if err != nil {
+			return nil, fmt.Errorf("jwt and node must be specifed either as parameter, os env or in config file")
+		}
+	}
+	return &connection{Jwt: cleanJwt(jwt), Node: fixNodeUrl(node)}, nil
+}
+
+func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	client := &http.Client{}
-	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", config.Jwt))
+	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", conn.Jwt))
 	resp, err := client.Do(r)
 	if err != nil {
 		return nil, fmt.Errorf("unable to do request: %v", err)
@@ -391,32 +444,32 @@ func doRequest(r *http.Request, config *config) (*http.Response, error) {
 	return resp, nil
 }
 
-func putZipConfig(zip *bytes.Buffer, config *config) error {
+func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
 	reader := bufio.NewReader(zip)
 
-	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/config?force=true", config.Node), reader)
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/conn?force=true", conn.Node), reader)
 	if err != nil {
-		// shouldn't happen if config is sane
+		// shouldn't happen if conn is sane
 		return fmt.Errorf("unable to create request: %v", err)
 	}
 	r.Header.Add("Content-Type", "application/zip")
 
-	_, err = doRequest(r, config)
+	_, err = conn.doRequest(r)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func getZipConfig(dst *os.File, config *config) error {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/config", config.Node), nil)
+func (conn *connection) getZipConfig(dst *os.File) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/conn", conn.Node), nil)
 	if err != nil {
-		// shouldn't happen if config is sane
+		// shouldn't happen if conn is sane
 		return fmt.Errorf("unable to create request: %v", err)
 	}
 	r.Header.Add("Accept", "application/zip")
 
-	resp, err := doRequest(r, config)
+	resp, err := conn.doRequest(r)
 	if err != nil {
 		return err
 	}
