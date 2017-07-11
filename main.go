@@ -22,18 +22,18 @@ import (
 )
 
 func myUsage() {
-	fmt.Fprintf(os.Stderr, "usage: %s [options] <command>\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS] <command>\n", os.Args[0])
 	text := `
 Commands:
-  init	    Store subscription token in current directory (not implemented yet)
+  init	    Store a long lived JWT in current directory (not implemented yet)
   clean	    Clean the build folder
   upload    Replace node config with local config
   download  Replace local config with node config
-  status    Compare local config with node config
+  status    Compare node config with local config (requires external diff command)
   run	    Run configuration until it stabilizes (not implemented yet)
-  update    Update expected output with current output
-  verify    Compare current output with expected output (not implemented yet)
-  test      Upload, run and verify solution (not implemented yet)
+  update    Store current output as expected output
+  verify    Compare output against expected output (not implemented yet)
+  test      Upload, run and verify output (not implemented yet)
 
 Options:
 `
@@ -41,6 +41,7 @@ Options:
 	flag.PrintDefaults()
 }
 
+// injected during build process
 var Version string
 
 var verboseFlag bool
@@ -83,7 +84,7 @@ func main() {
 	case "update":
 		err = update()
 	case "verify":
-
+		err = verify()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		flag.Usage()
@@ -94,13 +95,15 @@ func main() {
 	}
 }
 
-func update() error {
+type pipeHandler func(conn *connection, pipe *Pipe) error
+
+func processOutputPipes(handler pipeHandler) error {
 	conn, err := connect()
 	if err != nil {
 		return err
 	}
 	if singlePipeFlag != "" {
-		err = updateExpectedResults(conn, &Pipe{Id: singlePipeFlag})
+		err = handler(conn, &Pipe{Id: singlePipeFlag})
 		if err != nil {
 			return fmt.Errorf("failed to test %s: %s", singlePipeFlag, err)
 		}
@@ -112,7 +115,7 @@ func update() error {
 		}
 		for _, pipe := range pipes {
 			if pipe.getPipeType() == OutputPipe {
-				err = updateExpectedResults(conn, &pipe)
+				err = handler(conn, &pipe)
 				if err != nil {
 					return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
 				}
@@ -121,6 +124,42 @@ func update() error {
 	}
 	return nil
 }
+
+func verify() error {
+	return processOutputPipes(verifyExpectedResults)
+}
+
+func update() error {
+	return processOutputPipes(updateExpectedResults)
+}
+
+func verifyExpectedResults(conn *connection, pipe *Pipe) error {
+	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
+	err := loadSpec(pipe, &spec)
+	if err != nil {
+		return fmt.Errorf("failed to load testspec %s: %s", pipe.Id, err)
+	}
+	if spec.Ignore {
+		if verboseFlag {
+			log.Printf("Ignoring %s", pipe.Id)
+		}
+		return nil
+	}
+	var entities []entity
+	err = conn.getEntities(pipe, &entities)
+	if err != nil {
+		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
+	}
+	entities = normalizeList(spec, entities)
+	sort.Sort(byId(entities))
+	expected, err = loadExpected(pipe)
+
+	if err != nil {
+		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
+	}
+	return nil
+}
+
 
 func updateExpectedResults(conn *connection, pipe *Pipe) error {
 	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
