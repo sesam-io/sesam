@@ -104,6 +104,10 @@ $ cat foo-B.test.json
 ```
 This will compare the output of ``/publishers/foo/entities?my-param=A`` with the contents of ``foo-A.json`` and ``/publishers/foo/entities?my-param=B`` with the contents of ``foo-B.json``.
 
+### Internal properties
+
+All internal properties except ``_id`` and ``_deleted`` are removed from the output. Entities that has ``_deleted`` set to ``false`` will also be removed.
+
 ### Endpoints
 
 By default the entities are fetched from ``/pipes/<my-pipe>/entities``, but if endpoint is set it will be fetched from
@@ -159,4 +163,7 @@ $ sesam -version
 sesam version 0.0.8
 ```
 
+## Known issues
 
+* JSON encoder escapes <, > and & as \uxxxx
+* JSON encoder doesn't add a trailing newline to end of file

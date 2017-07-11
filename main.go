@@ -1,25 +1,28 @@
 package main
 
 import (
-	"fmt"
-	"flag"
-	"os"
-	"errors"
+	"archive/zip"
 	"bufio"
-	"strings"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
-	"bytes"
-	"archive/zip"
-	"path/filepath"
-	"io"
+	"os"
 	"os/exec"
-	"io/ioutil"
-	"encoding/json"
+	"path/filepath"
+	"strings"
+	"sort"
+	"reflect"
+	"regexp"
 )
 
 func myUsage() {
-	fmt.Fprintf(os.Stderr,"usage: %s [options] <command>\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "usage: %s [options] <command>\n", os.Args[0])
 	text := `
 Commands:
   clean	    Clean the build folder
@@ -27,7 +30,7 @@ Commands:
   download  Replace local config with node config
   status    Compare local config with node config
   run	    Run configuration until it stabilizes (not implemented yet)
-  update    Update expected output with current output (not implemented yet)
+  update    Update expected output with current output
   verify    Compare current output with expected output (not implemented yet)
   test      Upload, run and verify solution (not implemented yet)
 
@@ -43,12 +46,13 @@ var verboseFlag bool
 var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
+
 const buildDir = "build"
 
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
-	flag.StringVar(&nodeFlag,"node", "", "service url")
+	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
 	flag.Usage = myUsage
@@ -96,7 +100,10 @@ func update() error {
 		return err
 	}
 	if singlePipeFlag != "" {
-		//updateExpectedResults(conn, &Pipe{Id: singlePipeFlag })
+		err = updateExpectedResults(conn, &Pipe{Id: singlePipeFlag })
+		if err != nil {
+			return fmt.Errorf("failed to test %s: %s", singlePipeFlag, err)
+		}
 	} else {
 		var pipes []Pipe
 		err := conn.getPipes(&pipes)
@@ -127,24 +134,34 @@ func updateExpectedResults(conn *connection, pipe *Pipe) error {
 		}
 		return nil
 	}
-	var entities []map[string]interface{}
+	var entities []entity
 	err = conn.getEntities(pipe, &entities)
 	if err != nil {
 		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
 	}
 	entities = normalizeList(spec, entities)
+	sort.Sort(byId(entities))
 	bytes, _ := json.MarshalIndent(entities, "", "  ")
-	err = ioutil.WriteFile("expected/" + spec.File, bytes, 0644)
+	err = ioutil.WriteFile("expected/"+spec.File, bytes, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
 	}
 	return nil
 }
 
+type entity map[string]interface{}
+
+type byId []entity
+
+func (a byId) Len() int           { return len(a) }
+func (a byId) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a byId) Less(i, j int) bool { return a[i]["_id"].(string) < a[j]["_id"].(string) }
+
 type testSpec struct {
-	Ignore bool `json:"ignore"`
+	Ignore    bool     `json:"ignore"`
 	Blacklist []string `json:"blacklist"`
-	File string `json:"file"`
+	File      string   `json:"file"`
+	CompiledBlacklist []*regexp.Regexp
 }
 
 func loadSpec(pipe *Pipe, spec *testSpec) error {
@@ -156,38 +173,94 @@ func loadSpec(pipe *Pipe, spec *testSpec) error {
 		}
 		json.Unmarshal(raw, spec)
 	}
+	err := spec.compileBlacklist()
+	if err != nil {
+		return err
+	}
 	// file is optional, defaults applies
 	return nil
 }
 
-func normalizeList(spec testSpec, entities []map[string]interface{}) []map[string]interface{} {
-	var result []map[string]interface{}
-	for _, entity := range entities {
-		result = append(result, normalize(spec, entity))
-	}
-	return result
-}
-func normalize(spec testSpec, entity map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-	for key, value := range entity {
-		// TODO recurse if value is object, keep path so that blacklist works
-		if key == "_id" || key == "_deleted" {
-			result[key] = value
-		} else if strings.HasPrefix(key, "_") {
-			// ignore the other internal attributes
-		} else if !spec.isBlacklisted(key) {
-			result[key] = value
-		}
-	}
-	return result
-}
-func (spec testSpec) isBlacklisted(key string) bool {
-	for _, s := range spec.Blacklist {
-		if s == key {
+func (spec testSpec) isBlacklisted(path []string) bool {
+	expr := strings.Join(path, ".")
+	for _, s := range spec.CompiledBlacklist {
+		if s.MatchString(expr) {
 			return true
 		}
 	}
 	return false
+}
+// foo.bar -> foo\.bar
+// foo[].bar -> foo.*.bar
+func fixSyntax(i string) string {
+	// the jq implementation used foo[].bar syntax when foo was a dict of objects (typically keys to new objects)
+	i = strings.Replace(i, "[].", ".*.", -1)
+	// create a regex, foo.*.bar -> ^foo\..*\.bar (the alternative would be that the end user typed regex directly)
+	i = strings.Replace(i,".", "\\.", -1)
+	i = strings.Replace(i,"*", ".*", -1)
+	return "^" + i
+}
+
+func (spec *testSpec) compileBlacklist() error {
+	var rxs []*regexp.Regexp
+	for _, s := range spec.Blacklist {
+		c, err := regexp.Compile(fixSyntax(s))
+		if err != nil {
+			return err
+		}
+		rxs = append(rxs, c)
+	}
+	spec.CompiledBlacklist = rxs
+	return nil
+}
+
+func normalizeList(spec testSpec, entities []entity) []entity {
+	var result []entity
+	for _, entity := range entities {
+		result = append(result, normalize(spec, entity, []string{}))
+	}
+	return result
+}
+
+func normalize(spec testSpec, entity map[string]interface{}, parentPath []string) map[string]interface{} {
+	result := make(map[string]interface{})
+	for key, value := range entity {
+		path := append(parentPath, key)
+		if key == "_id" || (key == "_deleted" && value == true) {
+			result[key] = value
+		} else if strings.HasPrefix(key, "_") {
+			// ignore the other internal attributes
+		} else {
+			if !spec.isBlacklisted(path) {
+				result[key] = normalizeValue(spec, value, path)
+			} else {
+				if verboseFlag {
+					log.Printf("Ignoring blacklisted path: %s", path)
+				}
+			}
+		}
+	}
+	return result
+}
+func normalizeValue(spec testSpec, v interface{}, path []string) interface{} {
+	if v == nil {
+		return v
+	}
+	rt := reflect.TypeOf(v)
+	switch rt.Kind() {
+	case reflect.Slice:
+		fallthrough
+	case reflect.Array:
+		var fixed []interface{}
+		for _, e := range v.([]interface{}) {
+			fixed = append(fixed, normalizeValue(spec, e, path))
+		}
+		return fixed
+	case reflect.Map:
+		return normalize(spec, v.(map[string]interface{}), path)
+	default:
+		return v
+	}
 }
 
 func download() error {
@@ -217,7 +290,6 @@ func download() error {
 	fmt.Printf("Local config replaced by node config.\n")
 	return nil
 }
-
 
 func clean() error {
 	_, err := connect()
@@ -350,7 +422,6 @@ func rmFiles(dir string, matcher pathMatchFunc) error {
 	return nil
 }
 
-
 func zipDir(src string, matcher pathMatchFunc) (*bytes.Buffer, error) {
 	buf := new(bytes.Buffer)
 	w := zip.NewWriter(buf)
@@ -475,7 +546,7 @@ type parseResult struct {
 	jwt, node string
 }
 
-func parseSyncConfig(r *parseResult, f *os.File) (error) {
+func parseSyncConfig(r *parseResult, f *os.File) error {
 	// parse property-style
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -583,7 +654,7 @@ type PipeSink struct {
 
 type PipeConfig struct {
 	Source PipeSource `json:"source"`
-	Sink PipeSink `json:"sink"`
+	Sink   PipeSink   `json:"sink"`
 }
 
 type PipeConfigBlock struct {
@@ -591,7 +662,7 @@ type PipeConfigBlock struct {
 }
 
 type Pipe struct {
-	Id string `json:"_id"`
+	Id     string          `json:"_id"`
 	Config PipeConfigBlock `json:"config"`
 }
 
@@ -610,7 +681,6 @@ func (conn *connection) getPipes(target *[]Pipe) error {
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(target)
 }
-
 
 func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
 	reader := bufio.NewReader(zip)
@@ -647,7 +717,7 @@ func (conn *connection) getZipConfig(dst *os.File) error {
 	return err
 }
 
-func (conn *connection) getEntities(pipe *Pipe, target *[]map[string]interface{}) error {
+func (conn *connection) getEntities(pipe *Pipe, target *[]entity) error {
 	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe.Id), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
