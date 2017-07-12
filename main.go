@@ -84,7 +84,14 @@ func main() {
 	case "update":
 		err = update()
 	case "verify":
-		err = verify()
+		var okay bool
+		okay, err = verify()
+		if err != nil {
+			break
+		}
+		if !okay {
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		flag.Usage()
@@ -102,90 +109,201 @@ func processOutputPipes(handler pipeHandler) error {
 	if err != nil {
 		return err
 	}
-	if singlePipeFlag != "" {
-		err = handler(conn, &Pipe{Id: singlePipeFlag})
-		if err != nil {
-			return fmt.Errorf("failed to test %s: %s", singlePipeFlag, err)
-		}
-	} else {
-		var pipes []Pipe
-		err := conn.getPipes(&pipes)
-		if err != nil {
-			return fmt.Errorf("failed to get list of pipes: %s", err)
-		}
-		for _, pipe := range pipes {
-			if pipe.getPipeType() == OutputPipe {
-				err = handler(conn, &pipe)
-				if err != nil {
-					return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
-				}
+	var pipes []Pipe
+	err = conn.getPipes(&pipes)
+	if err != nil {
+		return fmt.Errorf("failed to get list of pipes: %s", err)
+	}
+	for _, pipe := range pipes {
+		if pipe.getPipeType() == OutputPipe {
+			err = handler(conn, &pipe)
+			if err != nil {
+				return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
 			}
 		}
 	}
 	return nil
 }
 
-func verify() error {
-	return processOutputPipes(verifyExpectedResults)
+func getSpecs(update bool) ([]*testSpec, error) {
+	files, err := ioutil.ReadDir("./expected")
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan expected dir, does it exist?: %s", err)
+	}
+	pipes := make(map[string]bool)
+	err = processOutputPipes(func (conn *connection, pipe *Pipe) error {
+		pipes[pipe.Id] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	specs := []*testSpec{}
+	testedPipes := make(map[string]int)
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".test.json") {
+			spec, err := loadSpec(f.Name())
+			if err != nil {
+				return nil, err
+			}
+			if !pipes[spec.Pipe] {
+				return nil, fmt.Errorf("test references non-existing pipe %s, remove %s", spec.Pipe, f.Name())
+			}
+			testedPipes[spec.Pipe]++
+			specs = append(specs, spec)
+		}
+	}
+	for pipe, _ := range pipes {
+		if testedPipes[pipe] < 1 {
+			if !update {
+				return nil, fmt.Errorf("no tests references pipe %s", pipe)
+			}
+			spec, err := createMissingSpec(pipe)
+			if err != nil {
+				return nil, err
+			}
+			specs = append(specs, spec)
+		}
+	}
+	return specs, nil
+}
+
+func createMissingSpec(pipe string) (*testSpec, error) {
+	if verboseFlag {
+		log.Printf("Creating missing placeholder test spec for pipe: %s", pipe)
+	}
+	specName := fmt.Sprintf("./expected/%s.test.json", pipe)
+	err := ioutil.WriteFile(specName, []byte("{\n}"), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create missing spec file: %s", err)
+	}
+	spec, err := loadSpec(fmt.Sprintf("%s.test.json", pipe))
+	if err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+func handleSingle(conn *connection, spec *testSpec, update bool) error {
+	file := fmt.Sprintf("expected/%s", spec.File)
+	if spec.Ignore {
+		if _, err := os.Stat(file); os.IsNotExist(err) {
+			if update {
+				err := os.Remove(file)
+				if err != nil {
+					return fmt.Errorf("failed to delete contents for ignored test: %s", err)
+				}
+			} else {
+				return fmt.Errorf("%s is ignored, but %s still exists", spec.Pipe, spec.File)
+			}
+		}
+		if verboseFlag {
+			log.Printf("Ignoring %s", spec.Pipe)
+		}
+		return nil
+	}
+	switch spec.Format {
+	case "json":
+		var entities []entity
+		err := conn.getEntities(spec.Pipe, &entities)
+		if err != nil {
+			return fmt.Errorf("entities failed for %s: %s", spec.Pipe, err)
+		}
+		entities = normalizeList(spec, entities)
+		sort.Sort(byId(entities))
+
+		if update {
+			bytes, _ := json.MarshalIndent(entities, "", "  ")
+			err = ioutil.WriteFile(file, bytes, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
+			}
+			return nil
+		} else {
+			expectedEntities := []entity{}
+			raw, err := ioutil.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			err = json.Unmarshal(raw, expectedEntities)
+			if err != nil {
+				return fmt.Errorf("failed to parse expected entities %s", err)
+			}
+			if len(entities) != len(expectedEntities) {
+				// report with channels
+				return fmt.Errorf("length mismatch: %d != %d", len(entities), len(expectedEntities))
+			}
+			for idx, entity := range entities {
+				if !reflect.DeepEqual(entity, expectedEntities[idx]) {
+					return fmt.Errorf("entity mismatch: %v != %v", entity, expectedEntities[idx])
+				}
+			}
+			return nil
+		}
+	default:
+		return fmt.Errorf("support for format %s not implemented yet", spec.Format)
+	}
+}
+
+func handle(update bool) ([]error, error) {
+	conn, err := connect()
+	if err != nil {
+		return nil, err
+	}
+	if singlePipeFlag != "" {
+		var spec *testSpec
+		testFile := fmt.Sprintf("%s.test.json", singlePipeFlag)
+		if _, err := os.Stat(fmt.Sprintf("expected/%s", testFile)); os.IsNotExist(err) {
+			if !update {
+				return nil, fmt.Errorf("no test spec: %s", testFile)
+			}
+			spec, err = createMissingSpec(singlePipeFlag)
+
+			if err != nil {
+				return nil, err
+			}
+		}
+		spec, err = loadSpec(testFile)
+		if err != nil {
+			return nil, err
+		}
+		err = handleSingle(conn, spec, update)
+		if err != nil {
+			return []error{err}, nil
+		}
+		return []error{}, nil
+	}
+	specs, err := getSpecs(true)
+	if err != nil {
+		return nil, err
+	}
+	errors := []error{}
+	for _, spec := range specs {
+		err := handleSingle(conn, spec, update)
+		if err != nil {
+			errors = append(errors, err)
+		}
+	}
+	return errors, nil
 }
 
 func update() error {
-	return processOutputPipes(updateExpectedResults)
+	_, err := handle(true)
+	return err
 }
 
-func verifyExpectedResults(conn *connection, pipe *Pipe) error {
-	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
-	err := loadSpec(pipe, &spec)
+func verify() (bool, error) {
+	errors, err := handle(false)
 	if err != nil {
-		return fmt.Errorf("failed to load testspec %s: %s", pipe.Id, err)
+		return false, err
 	}
-	if spec.Ignore {
-		if verboseFlag {
-			log.Printf("Ignoring %s", pipe.Id)
+	if len(errors) > 0 {
+		for _, err := range errors {
+			fmt.Printf("test failed: %s\n", err)
 		}
-		return nil
+		return false, nil
 	}
-	var entities []entity
-	err = conn.getEntities(pipe, &entities)
-	if err != nil {
-		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
-	}
-	entities = normalizeList(spec, entities)
-	sort.Sort(byId(entities))
-	expected, err = loadExpected(pipe)
-
-	if err != nil {
-		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
-	}
-	return nil
-}
-
-
-func updateExpectedResults(conn *connection, pipe *Pipe) error {
-	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
-	err := loadSpec(pipe, &spec)
-	if err != nil {
-		return fmt.Errorf("failed to load testspec %s: %s", pipe.Id, err)
-	}
-	if spec.Ignore {
-		if verboseFlag {
-			log.Printf("Ignoring %s", pipe.Id)
-		}
-		return nil
-	}
-	var entities []entity
-	err = conn.getEntities(pipe, &entities)
-	if err != nil {
-		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
-	}
-	entities = normalizeList(spec, entities)
-	sort.Sort(byId(entities))
-	bytes, _ := json.MarshalIndent(entities, "", "  ")
-	err = ioutil.WriteFile("expected/"+spec.File, bytes, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
-	}
-	return nil
+	return true, nil
 }
 
 type entity map[string]interface{}
@@ -201,23 +319,31 @@ type testSpec struct {
 	Blacklist         []string `json:"blacklist"`
 	File              string   `json:"file"`
 	CompiledBlacklist []*regexp.Regexp
+	Pipe              string   `json:"pipe"`
+	Format            string   `json:"format"`
 }
 
-func loadSpec(pipe *Pipe, spec *testSpec) error {
-	file := fmt.Sprintf("./expected/%s.test.json", pipe.Id)
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		raw, err := ioutil.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		json.Unmarshal(raw, spec)
+func loadSpec(f string) (*testSpec, error) {
+	// defaults
+	name := strings.TrimSuffix(f, ".test.json")
+	spec := testSpec{
+		File: fmt.Sprintf("%s.json", name),
+		Format: "json",
+		Pipe: name,
 	}
-	err := spec.compileBlacklist()
+	raw, err := ioutil.ReadFile(fmt.Sprintf("./expected/%s", f))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// file is optional, defaults applies
-	return nil
+	err = json.Unmarshal(raw, spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse test spec: %s", err)
+	}
+	err = spec.compileBlacklist()
+	if err != nil {
+		return nil, err
+	}
+	return &spec, nil
 }
 
 func (spec testSpec) isBlacklisted(path []string) bool {
@@ -254,7 +380,7 @@ func (spec *testSpec) compileBlacklist() error {
 	return nil
 }
 
-func normalizeList(spec testSpec, entities []entity) []entity {
+func normalizeList(spec *testSpec, entities []entity) []entity {
 	var result []entity
 	for _, entity := range entities {
 		ctx := &normalizeContext{root: entity, spec: spec}
@@ -265,7 +391,7 @@ func normalizeList(spec testSpec, entities []entity) []entity {
 
 type normalizeContext struct {
 	root entity
-	spec testSpec
+	spec *testSpec
 }
 
 func (ctx normalizeContext) normalize(entity map[string]interface{}, parentPath []string) map[string]interface{} {
@@ -764,8 +890,8 @@ func (conn *connection) getZipConfig(dst *os.File) error {
 	return err
 }
 
-func (conn *connection) getEntities(pipe *Pipe, target *[]entity) error {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe.Id), nil)
+func (conn *connection) getEntities(pipe string, target *[]entity) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
