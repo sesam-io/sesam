@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -32,7 +33,7 @@ Commands:
   status    Compare node config with local config (requires external diff command)
   run	    Run configuration until it stabilizes (not implemented yet)
   update    Store current output as expected output
-  verify    Compare output against expected output (not implemented yet)
+  verify    Compare output against expected output
   test      Upload, run and verify output (not implemented yet)
 
 Options:
@@ -48,6 +49,7 @@ var verboseFlag bool
 var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
+var profileFlag string
 
 const buildDir = "build"
 
@@ -57,6 +59,7 @@ func main() {
 	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
+	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
@@ -131,7 +134,7 @@ func getSpecs(update bool) ([]*testSpec, error) {
 		return nil, fmt.Errorf("failed to scan expected dir, does it exist?: %s", err)
 	}
 	pipes := make(map[string]bool)
-	err = processOutputPipes(func (conn *connection, pipe *Pipe) error {
+	err = processOutputPipes(func(conn *connection, pipe *Pipe) error {
 		pipes[pipe.Id] = true
 		return nil
 	})
@@ -185,6 +188,7 @@ func createMissingSpec(pipe string) (*testSpec, error) {
 }
 
 func handleSingle(conn *connection, spec *testSpec, update bool) error {
+	// TODO store actual output if debugFlag is enabled and tests fails
 	file := fmt.Sprintf("expected/%s", spec.File)
 	if spec.Ignore {
 		if _, err := os.Stat(file); os.IsNotExist(err) {
@@ -202,7 +206,7 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 		}
 		return nil
 	}
-	switch spec.Format {
+	switch spec.Endpoint {
 	case "json":
 		var entities []entity
 		err := conn.getEntities(spec.Pipe, &entities)
@@ -225,23 +229,60 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 			if err != nil {
 				return err
 			}
-			err = json.Unmarshal(raw, expectedEntities)
+			err = json.Unmarshal(raw, &expectedEntities)
 			if err != nil {
 				return fmt.Errorf("failed to parse expected entities %s", err)
 			}
 			if len(entities) != len(expectedEntities) {
-				// report with channels
-				return fmt.Errorf("length mismatch: %d != %d", len(entities), len(expectedEntities))
+				// TODO report with channels
+				return fmt.Errorf("length mismatch: expected %d got %d", len(expectedEntities), len(entities))
 			}
 			for idx, entity := range entities {
+				// just do a index lookup, in case ordering changes this might be hard to debug
 				if !reflect.DeepEqual(entity, expectedEntities[idx]) {
-					return fmt.Errorf("entity mismatch: %v != %v", entity, expectedEntities[idx])
+					return fmt.Errorf("entity mismatch expected: %v got %v", expectedEntities[idx], entity)
 				}
 			}
 			return nil
 		}
+	case "xml":
+		bytes, err := conn.getXml(spec.Pipe, spec.Parameters)
+		if err != nil {
+			return fmt.Errorf("xml failed for %s: %s", spec.Pipe, err)
+		}
+		var entities interface{}
+		err = xml.Unmarshal(bytes, &entities)
+		if err != nil {
+			return fmt.Errorf("failed to parse xml: %s", err)
+		}
+
+		// normalize if needed here
+
+		if update {
+			bytes, _ := xml.MarshalIndent(entities, "", "  ")
+			err = ioutil.WriteFile(file, bytes, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
+			}
+			return nil
+		} else {
+			var expectedEntities interface{}
+			raw, err := ioutil.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			err = xml.Unmarshal(raw, &expectedEntities)
+			if err != nil {
+				return fmt.Errorf("failed to parse expected xml %s", err)
+			}
+			if !reflect.DeepEqual(entities, expectedEntities) {
+				// TODO report with channels
+				return fmt.Errorf("xml content mismatch: expected %d got %d", expectedEntities, entities)
+			}
+			return nil
+		}
 	default:
-		return fmt.Errorf("support for format %s not implemented yet", spec.Format)
+		return fmt.Errorf("support for format %s not implemented yet", spec.Endpoint)
 	}
 }
 
@@ -269,7 +310,7 @@ func handle(update bool) ([]error, error) {
 		}
 		err = handleSingle(conn, spec, update)
 		if err != nil {
-			return []error{err}, nil
+			return []error{fmt.Errorf("%s: %s", singlePipeFlag, err)}, nil
 		}
 		return []error{}, nil
 	}
@@ -281,7 +322,7 @@ func handle(update bool) ([]error, error) {
 	for _, spec := range specs {
 		err := handleSingle(conn, spec, update)
 		if err != nil {
-			errors = append(errors, err)
+			errors = append(errors, fmt.Errorf("%s: %s", spec.Id, err))
 		}
 	}
 	return errors, nil
@@ -315,27 +356,30 @@ func (a byId) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byId) Less(i, j int) bool { return a[i]["_id"].(string) < a[j]["_id"].(string) }
 
 type testSpec struct {
+	Id                string   `json:"_id"`
 	Ignore            bool     `json:"ignore"`
 	Blacklist         []string `json:"blacklist"`
 	File              string   `json:"file"`
 	CompiledBlacklist []*regexp.Regexp
-	Pipe              string   `json:"pipe"`
-	Format            string   `json:"format"`
+	Pipe              string            `json:"pipe"`
+	Endpoint            string            `json:"endpoint"`
+	Parameters        map[string]string `json:"parameters"`
 }
 
 func loadSpec(f string) (*testSpec, error) {
 	// defaults
 	name := strings.TrimSuffix(f, ".test.json")
 	spec := testSpec{
-		File: fmt.Sprintf("%s.json", name),
-		Format: "json",
-		Pipe: name,
+		Id:     name,
+		File:   fmt.Sprintf("%s.json", name),
+		Endpoint: "json",
+		Pipe:   name,
 	}
 	raw, err := ioutil.ReadFile(fmt.Sprintf("./expected/%s", f))
 	if err != nil {
 		return nil, err
 	}
-	err = json.Unmarshal(raw, spec)
+	err = json.Unmarshal(raw, &spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse test spec: %s", err)
 	}
@@ -480,10 +524,24 @@ func clean() error {
 }
 
 func upload() error {
-	// TODO implement profile, default profile is test-env.json
 	conn, err := connect()
 	if err != nil {
 		return err
+	}
+
+	profileFile := fmt.Sprintf("%s-env.json", profileFlag)
+	byte, err := ioutil.ReadFile(profileFile)
+	if err != nil {
+		return fmt.Errorf("failed to load profile %s:", profileFile)
+	}
+	var env interface{}
+	err = json.Unmarshal(byte, &env)
+	if err != nil {
+		return fmt.Errorf("failed to parse profile: %s", err)
+	}
+	err = conn.putEnv(env)
+	if err != nil {
+		return fmt.Errorf("failed to replace env: %s", err)
 	}
 
 	buf, err := zipConfig()
@@ -904,4 +962,43 @@ func (conn *connection) getEntities(pipe string, target *[]entity) error {
 
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) getXml(pipe string, parameters map[string]string,) ([]byte, error) {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/xml", conn.Node, pipe), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return nil, fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+	bytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
+}
+
+func (conn *connection) putEnv(env interface{}) error {
+	b, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/env", conn.Node), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
 }
