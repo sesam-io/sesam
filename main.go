@@ -34,7 +34,7 @@ Commands:
   run	    Run configuration until it stabilizes (not implemented yet)
   update    Store current output as expected output
   verify    Compare output against expected output
-  test      Upload, run and verify output (not implemented yet)
+  test      Upload, run and verify output
 
 Options:
 `
@@ -61,7 +61,7 @@ func main() {
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
 	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
-	flag.IntVar(&runsFlag, "runs", 3, "number of test runs to check for stability")
+	flag.IntVar(&runsFlag, "runs", 1, "number of test runs to check for stability")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
