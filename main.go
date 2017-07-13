@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 func myUsage() {
@@ -31,7 +32,7 @@ Commands:
   upload    Replace node config with local config
   download  Replace local config with node config
   status    Compare node config with local config (requires external diff command)
-  run	    Run configuration until it stabilizes (not implemented yet)
+  run	    Run configuration until it stabilizes
   update    Store current output as expected output
   verify    Compare output against expected output
   test      Upload, run and verify output
@@ -51,6 +52,9 @@ var jwtFlag string
 var singlePipeFlag string
 var profileFlag string
 var runsFlag int
+const schedulerImage = "sesamcommunity/scheduler:latest"
+const schedulerPort = 5000
+const schedulerSystemName = "scheduler"
 
 const buildDir = "build"
 
@@ -105,11 +109,56 @@ func main() {
 }
 
 func run() error {
-	// TODO
-	// upload runner microservice
+	conn, err := connect()
+	if err != nil {
+		return err
+	}
+	var scheduler interface{}
+	err = json.Unmarshal(bytes(fmt.Sprintf(`
+{
+ "_id": "%s",
+ "type": "system:microservice",
+ "docker": {
+  "environment": {
+    "JWT": "%s",
+    "URL": "%s"
+   },
+  "image": "%s",
+  "port": %d
+ }
+}
+`, schedulerSystemName, conn.Jwt, conn.Node, schedulerImage, schedulerPort)), &scheduler)
+	if err != nil {
+		return err
+	}
+	err = conn.putSystem(schedulerSystemName, scheduler)
+	if err != nil {
+		return fmt.Errorf("failed to create scheduler: %s", err)
+	}
+
 	// start microservice using proxy api
+	err = conn.postProxyNoBody(schedulerSystemName, "/")
+	if err != nil {
+		return fmt.Errorf("failed to start scheduler: %s", err)
+	}
+
 	// poll status api and display progress until finished or failed
-	return fmt.Errorf("run not implemented yet")
+	var proxyStatus map[string]interface{}
+	for {
+		// wait 5 seconds before polling
+		time.Sleep(5000 * time.Millisecond)
+		if verboseFlag {
+			fmt.Printf("Checking scheduler..")
+		}
+		err = conn.getProxyJson(schedulerSystemName, "/", &proxyStatus)
+		if proxyStatus["state"] == "success" {
+			break
+		}
+		if proxyStatus["state"] == "failed" {
+			return fmt.Errorf("scheduler failed, check the scheduler log and pipe execution datasets in the node")
+		}
+	}
+	return nil
 }
 
 func test() error {
@@ -1029,4 +1078,52 @@ func (conn *connection) putEnv(env interface{}) error {
 		return err
 	}
 	return nil
+}
+
+func (conn *connection) putSystem(id string, system interface{}) error {
+	b, err := json.Marshal(system)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/system/%s", conn.Node, id), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) postProxyNoBody(system string, subUrl string) error {
+	r, err := http.NewRequest("POST", fmt.Sprintf("%s/system/%s/proxy/%s", conn.Node, system, subUrl), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) getProxyJson(system string, subUrl string, target interface{}) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/system/%s/proxy/%s", conn.Node, subUrl), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
 }
