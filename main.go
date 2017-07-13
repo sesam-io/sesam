@@ -50,6 +50,7 @@ var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
 var profileFlag string
+var runsFlag int
 
 const buildDir = "build"
 
@@ -60,6 +61,7 @@ func main() {
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
 	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
+	flag.IntVar(&runsFlag, "runs", 3, "number of test runs to check for stability")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
@@ -115,11 +117,20 @@ func test() error {
 	if err != nil {
 		return err
 	}
-	err = run()
-	if err != nil {
-		return err
+	for i := 1; i <= runsFlag; i++ {
+		err = run()
+		if err != nil {
+			return err
+		}
+		err = verify()
+		if err != nil {
+			return err
+		}
+		if verboseFlag {
+			fmt.Printf("Finished test %d/%d..", i, runsFlag)
+		}
 	}
-	return verify()
+	return nil
 }
 
 type pipeHandler func(conn *connection, pipe *Pipe) error
