@@ -87,14 +87,11 @@ func main() {
 	case "update":
 		err = update()
 	case "verify":
-		var okay bool
-		okay, err = verify()
-		if err != nil {
-			break
-		}
-		if !okay {
-			os.Exit(1)
-		}
+		err = verify()
+	case "test":
+		err = test()
+	case "run":
+		err = run()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		flag.Usage()
@@ -103,6 +100,26 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s failed: %s\n", command, err)
 		os.Exit(1)
 	}
+}
+
+func run() error {
+	// TODO
+	// upload runner microservice
+	// start microservice using proxy api
+	// poll status api and display progress until finished or failed
+	return fmt.Errorf("run not implemented yet")
+}
+
+func test() error {
+	err := upload()
+	if err != nil {
+		return err
+	}
+	err = run()
+	if err != nil {
+		return err
+	}
+	return verify()
 }
 
 type pipeHandler func(conn *connection, pipe *Pipe) error
@@ -333,18 +350,18 @@ func update() error {
 	return err
 }
 
-func verify() (bool, error) {
+func verify() (error) {
 	errors, err := handle(false)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if len(errors) > 0 {
 		for _, err := range errors {
 			fmt.Printf("test failed: %s\n", err)
 		}
-		return false, nil
+		return fmt.Errorf("%d tests failed", len(errors))
 	}
-	return true, nil
+	return nil
 }
 
 type entity map[string]interface{}
