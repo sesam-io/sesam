@@ -52,19 +52,22 @@ var jwtFlag string
 var singlePipeFlag string
 var profileFlag string
 var runsFlag int
+var customSchedulerFlag bool
+var schedulerIdFlag string
 const schedulerImage = "sesamcommunity/scheduler:latest"
 const schedulerPort = 5000
-const schedulerSystemName = "scheduler"
 
 const buildDir = "build"
 
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
+	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
 	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
 	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
+	flag.StringVar(&schedulerIdFlag, "scheduler-id", "scheduler", "system id for the scheduler system")
 	flag.IntVar(&runsFlag, "runs", 1, "number of test cycles to check for stability")
 	flag.Usage = myUsage
 	flag.Parse()
@@ -113,31 +116,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var scheduler interface{}
-	err = json.Unmarshal(bytes(fmt.Sprintf(`
-{
- "_id": "%s",
- "type": "system:microservice",
- "docker": {
-  "environment": {
-    "JWT": "%s",
-    "URL": "%s"
-   },
-  "image": "%s",
-  "port": %d
- }
-}
-`, schedulerSystemName, conn.Jwt, conn.Node, schedulerImage, schedulerPort)), &scheduler)
-	if err != nil {
-		return err
-	}
-	err = conn.putSystem(schedulerSystemName, scheduler)
-	if err != nil {
-		return fmt.Errorf("failed to create scheduler: %s", err)
-	}
 
 	// start microservice using proxy api
-	err = conn.postProxyNoBody(schedulerSystemName, "/")
+	err = conn.postProxyNoBody(schedulerIdFlag, "start")
 	if err != nil {
 		return fmt.Errorf("failed to start scheduler: %s", err)
 	}
@@ -150,7 +131,7 @@ func run() error {
 		if verboseFlag {
 			fmt.Printf("Checking scheduler..")
 		}
-		err = conn.getProxyJson(schedulerSystemName, "/", &proxyStatus)
+		err = conn.getProxyJson(schedulerIdFlag, "status", &proxyStatus)
 		if proxyStatus["state"] == "success" {
 			break
 		}
@@ -631,7 +612,38 @@ func upload() error {
 	if err != nil {
 		return err
 	}
+	if !customSchedulerFlag {
+		err = addDefaultScheduler(conn)
+		if err != nil {
+			return err
+		}
+	}
 	fmt.Printf("Node config replaced with local config.\n")
+	return nil
+}
+func addDefaultScheduler(conn *connection) error {
+	var scheduler []interface{}
+	err := json.Unmarshal([]byte(fmt.Sprintf(`
+[{
+ "_id": "%s",
+ "type": "system:microservice",
+ "docker": {
+  "environment": {
+    "JWT": "%s",
+    "URL": "%s"
+   },
+  "image": "%s",
+  "port": %d
+ }
+}]
+`, schedulerIdFlag, conn.Jwt, conn.Node, schedulerImage, schedulerPort)), &scheduler)
+	if err != nil {
+		return err
+	}
+	err = conn.postSystems(scheduler)
+	if err != nil {
+		return fmt.Errorf("failed to create scheduler: %s", err)
+	}
 	return nil
 }
 
@@ -928,8 +940,8 @@ func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to talk to the node (got HTTP 403 Forbidden), maybe the JWT has expired?")
 	}
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("expected http status code 200, got: %d", resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("expected http status code 2xx, got: %d", resp.StatusCode)
 	}
 	return resp, nil
 }
@@ -1080,12 +1092,13 @@ func (conn *connection) putEnv(env interface{}) error {
 	return nil
 }
 
-func (conn *connection) putSystem(id string, system interface{}) error {
-	b, err := json.Marshal(system)
+func (conn *connection) postSystems(systems []interface{}) error {
+	b, err := json.Marshal(systems)
 	if err != nil {
 		return err
 	}
-	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/system/%s", conn.Node, id), bytes.NewBuffer(b))
+	fmt.Println(string(b))
+	r, err := http.NewRequest("POST", fmt.Sprintf("%s/systems", conn.Node), bytes.NewBuffer(b))
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
@@ -1100,7 +1113,7 @@ func (conn *connection) putSystem(id string, system interface{}) error {
 }
 
 func (conn *connection) postProxyNoBody(system string, subUrl string) error {
-	r, err := http.NewRequest("POST", fmt.Sprintf("%s/system/%s/proxy/%s", conn.Node, system, subUrl), nil)
+	r, err := http.NewRequest("POST", fmt.Sprintf("%s/systems/%s/proxy/%s", conn.Node, system, subUrl), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)

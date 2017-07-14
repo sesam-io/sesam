@@ -146,9 +146,26 @@ If the data is not located at the top level, a dotted notation is supported ``fo
 
 It is recommended to avoid ignoring or blacklisting as much as possible as this creates a false sense of correctness. Tests will pass, but deviations are silently ignored.
 
+### Scheduler customization
+
+By default the upload command will add a test-friendly scheduler as part of the configuration. The ``_id`` for this micro service system is ``scheduler``, but it can be overridden with the flag "--scheduler-id my-scheduler-id" if you need to override this.
+ 
+If you want to configure a custom scheduler manually as part of the configuration you need to enable the ``--custom-scheduler`` flag.
+
+This custom scheduler needs to implement the following: 
+
+1. POST /start (the tool will call this when the scheduler should start)
+
+2. GET / (the tool will then poll this until it returns with state 'success' or 'failure')
+```
+{
+  "state": "?|success|failure" 
+}
+```
+
 ## Installing
 
-Prebuild binaries for common platforms can be downloaded from [Github Releases](https://github.com/sesam-io/sesam/releases/).
+Prebuilt binaries for common platforms can be downloaded from [Github Releases](https://github.com/sesam-io/sesam/releases/).
 
 ## Building from source
 
