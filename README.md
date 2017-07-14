@@ -84,26 +84,24 @@ Example:
 ```
 $ cat foo-A.test.json
 {
-  "_id": "foo",
-  "type": "test",
-  "file": "foo-A.json",
-  "endpoint": "entities",
+  "pipe": "foo",
+  "file": "foo-A.xml",
+  "endpoint": "xml",
   "parameters": {
     "my-param": "A"
   }
 }
 $ cat foo-B.test.json
 {
-  "_id": "foo",
-  "type": "test",
-  "file": "foo-B.json",
-  "endpoint": "entities",
+  "pipe": "foo",
+  "file": "foo-B.xml",
+  "endpoint": "xml",
   "parameters": {
     "my-param": "B"
   }
 }
 ```
-This will compare the output of ``/publishers/foo/entities?my-param=A`` with the contents of ``foo-A.json`` and ``/publishers/foo/entities?my-param=B`` with the contents of ``foo-B.json``.
+This will compare the output of ``/publishers/foo/xml?my-param=A`` with the contents of ``foo-A.xml`` and ``/publishers/foo/xml?my-param=B`` with the contents of ``foo-B.xml``.
 
 ### Internal properties
 
@@ -112,7 +110,7 @@ All internal properties except ``_id`` and ``_deleted`` are removed from the out
 ### Endpoints
 
 By default the entities are fetched from ``/pipes/<my-pipe>/entities``, but if endpoint is set it will be fetched from
-``/publishers/<my-pipe>/<endpoint-type>`` based on the endpoint type specified. Note that the pipe needs to be configured to publish to this endpoint as well.
+``/publishers/<my-pipe>/<endpoint-type>`` based on the endpoint type specified. Note that the pipe needs to be configured to publish to this endpoint.
  
 Example:
 ```
@@ -141,10 +139,37 @@ Example:
 This will filter out properties called ``foo`` and ``ns1:bar`` (namespaced).
  
 If the data is not located at the top level, a dotted notation is supported ``foo.bar``. This will remove the ``bar`` property from the object (or list of objects) located under the ``foo`` property. If you need to blacklist a property that actually contains a dot, the dot can be escaped like this ``foo\.bar``
+
+If you need to ignore a property on a list of objects, you can also use this notation ``foos.*.bar``. This will remove the ``bar`` property from all the objects located under ``foos``.
+
+Example:
+```
+{
+  "_id": "foo",
+  "foos": {
+    "A": {
+      "bar": "baz",
+      "foobar": "foo"
+    }
+  }
+}
+```
+
+Will end up as the following (with ``"blacklist": ["foos.*.bar"]``):
+```
+{
+  "_id": "foo",
+  "foos": {
+    "A": {
+      "foobar": "foo"
+    }
+  }
+}
+```
   
 ### Avoid ignore and blacklist
 
-It is recommended to avoid ignoring or blacklisting as much as possible as this creates a false sense of correctness. Tests will pass, but deviations are silently ignored.
+It is recommended to avoid ignoring or blacklisting as much as possible as this creates a false sense of correctness. Tests will pass, but deviations are silently ignored. A better solution is to avoid these properties in the output if possible.
 
 ### Scheduler customization
 
@@ -155,7 +180,6 @@ If you want to configure a custom scheduler manually as part of the configuratio
 This custom scheduler needs to implement the following: 
 
 1. POST /start (the tool will call this when the scheduler should start)
-
 2. GET / (the tool will then poll this until it returns with state 'success' or 'failure')
 ```
 {
