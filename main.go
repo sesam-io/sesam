@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,24 +16,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-	"sort"
 	"reflect"
 	"regexp"
+	"sort"
+	"strings"
+	"time"
 )
 
 func myUsage() {
-	fmt.Fprintf(os.Stderr, "usage: %s [options] <command>\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS] <command>\n", os.Args[0])
 	text := `
 Commands:
+  init	    Store a long lived JWT in current directory (not implemented yet)
   clean	    Clean the build folder
   upload    Replace node config with local config
   download  Replace local config with node config
-  status    Compare local config with node config
-  run	    Run configuration until it stabilizes (not implemented yet)
-  update    Update expected output with current output
-  verify    Compare current output with expected output (not implemented yet)
-  test      Upload, run and verify solution (not implemented yet)
+  status    Compare node config with local config (requires external diff command)
+  run	    Run configuration until it stabilizes
+  update    Store current output as expected output
+  verify    Compare output against expected output
+  test      Upload, run and verify output
 
 Options:
 `
@@ -40,21 +43,32 @@ Options:
 	flag.PrintDefaults()
 }
 
+// injected during build process
 var Version string
 
 var verboseFlag bool
 var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
+var profileFlag string
+var runsFlag int
+var customSchedulerFlag bool
+var schedulerIdFlag string
+const schedulerImage = "sesamcommunity/scheduler:latest"
+const schedulerPort = 5000
 
 const buildDir = "build"
 
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
+	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
 	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
 	flag.StringVar(&singlePipeFlag, "single", "", "update or verify just a single pipe")
+	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
+	flag.StringVar(&schedulerIdFlag, "scheduler-id", "scheduler", "system id for the scheduler system")
+	flag.IntVar(&runsFlag, "runs", 1, "number of test cycles to check for stability")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
@@ -65,7 +79,6 @@ func main() {
 
 	args := flag.Args()
 	if len(args) == 0 {
-		// TODO add sub command Usage
 		flag.Usage()
 		return
 	}
@@ -82,9 +95,14 @@ func main() {
 		err = status()
 	case "update":
 		err = update()
+	case "verify":
+		err = verify()
+	case "test":
+		err = test()
+	case "run":
+		err = run()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
-		// TODO add sub command Usage
 		flag.Usage()
 	}
 	if err != nil {
@@ -93,58 +111,296 @@ func main() {
 	}
 }
 
-func update() error {
-	// TODO support updating just one dataset (flag?)
+func run() error {
 	conn, err := connect()
 	if err != nil {
 		return err
 	}
-	if singlePipeFlag != "" {
-		err = updateExpectedResults(conn, &Pipe{Id: singlePipeFlag })
-		if err != nil {
-			return fmt.Errorf("failed to test %s: %s", singlePipeFlag, err)
+
+	// start microservice using proxy api
+	err = conn.postProxyNoBody(schedulerIdFlag, "start")
+	if err != nil {
+		return fmt.Errorf("failed to start scheduler: %s", err)
+	}
+
+	// poll status api and display progress until finished or failed
+	var proxyStatus map[string]interface{}
+	for {
+		// wait 5 seconds before polling
+		time.Sleep(5000 * time.Millisecond)
+		if verboseFlag {
+			fmt.Printf("Checking scheduler..")
 		}
-	} else {
-		var pipes []Pipe
-		err := conn.getPipes(&pipes)
-		if err != nil {
-			return fmt.Errorf("failed to get list of pipes: %s", err)
+		err = conn.getProxyJson(schedulerIdFlag, "status", &proxyStatus)
+		if proxyStatus["state"] == "success" {
+			break
 		}
-		for _, pipe := range pipes {
-			if pipe.getPipeType() == OutputPipe {
-				err = updateExpectedResults(conn, &pipe)
-				if err != nil {
-					return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
-				}
+		if proxyStatus["state"] == "failed" {
+			return fmt.Errorf("scheduler failed, check the scheduler log and pipe execution datasets in the node")
+		}
+	}
+	return nil
+}
+
+func test() error {
+	err := upload()
+	if err != nil {
+		return err
+	}
+	for i := 1; i <= runsFlag; i++ {
+		err = run()
+		if err != nil {
+			return err
+		}
+		err = verify()
+		if err != nil {
+			return err
+		}
+		if verboseFlag {
+			fmt.Printf("Finished test %d/%d..", i, runsFlag)
+		}
+	}
+	return nil
+}
+
+type pipeHandler func(conn *connection, pipe *Pipe) error
+
+func processOutputPipes(handler pipeHandler) error {
+	conn, err := connect()
+	if err != nil {
+		return err
+	}
+	var pipes []Pipe
+	err = conn.getPipes(&pipes)
+	if err != nil {
+		return fmt.Errorf("failed to get list of pipes: %s", err)
+	}
+	for _, pipe := range pipes {
+		if pipe.getPipeType() == OutputPipe {
+			err = handler(conn, &pipe)
+			if err != nil {
+				return fmt.Errorf("failed to test %s: %s", pipe.Id, err)
 			}
 		}
 	}
 	return nil
 }
 
-func updateExpectedResults(conn *connection, pipe *Pipe) error {
-	spec := testSpec{File: fmt.Sprintf("%s.json", pipe.Id)}
-	err := loadSpec(pipe, &spec)
+func getSpecs(update bool) ([]*testSpec, error) {
+	files, err := ioutil.ReadDir("./expected")
 	if err != nil {
-		return fmt.Errorf("failed to load testspec %s: %s", pipe.Id, err)
+		return nil, fmt.Errorf("failed to scan expected dir, does it exist?: %s", err)
 	}
+	pipes := make(map[string]bool)
+	err = processOutputPipes(func(conn *connection, pipe *Pipe) error {
+		pipes[pipe.Id] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	specs := []*testSpec{}
+	testedPipes := make(map[string]int)
+	for _, f := range files {
+		if strings.HasSuffix(f.Name(), ".test.json") {
+			spec, err := loadSpec(f.Name())
+			if err != nil {
+				return nil, err
+			}
+			if !pipes[spec.Pipe] {
+				return nil, fmt.Errorf("test references non-existing pipe %s, remove %s", spec.Pipe, f.Name())
+			}
+			testedPipes[spec.Pipe]++
+			specs = append(specs, spec)
+		}
+	}
+	for pipe, _ := range pipes {
+		if testedPipes[pipe] < 1 {
+			if !update {
+				return nil, fmt.Errorf("no tests references pipe %s", pipe)
+			}
+			spec, err := createMissingSpec(pipe)
+			if err != nil {
+				return nil, err
+			}
+			specs = append(specs, spec)
+		}
+	}
+	return specs, nil
+}
+
+func createMissingSpec(pipe string) (*testSpec, error) {
+	if verboseFlag {
+		log.Printf("Creating missing placeholder test spec for pipe: %s", pipe)
+	}
+	specName := fmt.Sprintf("./expected/%s.test.json", pipe)
+	err := ioutil.WriteFile(specName, []byte("{\n}"), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create missing spec file: %s", err)
+	}
+	spec, err := loadSpec(fmt.Sprintf("%s.test.json", pipe))
+	if err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+func handleSingle(conn *connection, spec *testSpec, update bool) error {
+	// TODO store actual output if debugFlag is enabled and tests fails
+	file := fmt.Sprintf("expected/%s", spec.File)
 	if spec.Ignore {
+		if _, err := os.Stat(file); os.IsNotExist(err) {
+			if update {
+				err := os.Remove(file)
+				if err != nil {
+					return fmt.Errorf("failed to delete contents for ignored test: %s", err)
+				}
+			} else {
+				return fmt.Errorf("%s is ignored, but %s still exists", spec.Pipe, spec.File)
+			}
+		}
 		if verboseFlag {
-			log.Printf("Ignoring %s", pipe.Id)
+			log.Printf("Ignoring %s", spec.Pipe)
 		}
 		return nil
 	}
-	var entities []entity
-	err = conn.getEntities(pipe, &entities)
-	if err != nil {
-		return fmt.Errorf("entities failed for %s: %s", pipe.Id, err)
+	switch spec.Endpoint {
+	case "json":
+		var entities []entity
+		err := conn.getEntities(spec.Pipe, &entities)
+		if err != nil {
+			return fmt.Errorf("entities failed for %s: %s", spec.Pipe, err)
+		}
+		entities = normalizeList(spec, entities)
+		sort.Sort(byId(entities))
+
+		if update {
+			bytes, _ := json.MarshalIndent(entities, "", "  ")
+			err = ioutil.WriteFile(file, bytes, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
+			}
+			return nil
+		} else {
+			expectedEntities := []entity{}
+			raw, err := ioutil.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			err = json.Unmarshal(raw, &expectedEntities)
+			if err != nil {
+				return fmt.Errorf("failed to parse expected entities %s", err)
+			}
+			if len(entities) != len(expectedEntities) {
+				// TODO report with channels
+				return fmt.Errorf("length mismatch: expected %d got %d", len(expectedEntities), len(entities))
+			}
+			for idx, entity := range entities {
+				// just do a index lookup, in case ordering changes this might be hard to debug
+				if !reflect.DeepEqual(entity, expectedEntities[idx]) {
+					return fmt.Errorf("entity mismatch expected: %v got %v", expectedEntities[idx], entity)
+				}
+			}
+			return nil
+		}
+	case "xml":
+		bytes, err := conn.getXml(spec.Pipe, spec.Parameters)
+		if err != nil {
+			return fmt.Errorf("xml failed for %s: %s", spec.Pipe, err)
+		}
+		var entities interface{}
+		err = xml.Unmarshal(bytes, &entities)
+		if err != nil {
+			return fmt.Errorf("failed to parse xml: %s", err)
+		}
+
+		// normalize if needed here
+
+		if update {
+			bytes, _ := xml.MarshalIndent(entities, "", "  ")
+			err = ioutil.WriteFile(file, bytes, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
+			}
+			return nil
+		} else {
+			var expectedEntities interface{}
+			raw, err := ioutil.ReadFile(file)
+			if err != nil {
+				return err
+			}
+			err = xml.Unmarshal(raw, &expectedEntities)
+			if err != nil {
+				return fmt.Errorf("failed to parse expected xml %s", err)
+			}
+			if !reflect.DeepEqual(entities, expectedEntities) {
+				// TODO report with channels
+				return fmt.Errorf("xml content mismatch: expected %d got %d", expectedEntities, entities)
+			}
+			return nil
+		}
+	default:
+		return fmt.Errorf("support for format %s not implemented yet", spec.Endpoint)
 	}
-	entities = normalizeList(spec, entities)
-	sort.Sort(byId(entities))
-	bytes, _ := json.MarshalIndent(entities, "", "  ")
-	err = ioutil.WriteFile("expected/"+spec.File, bytes, 0644)
+}
+
+func handle(update bool) ([]error, error) {
+	conn, err := connect()
 	if err != nil {
-		return fmt.Errorf("failed to updated expected file %s: %s", pipe.Id, err)
+		return nil, err
+	}
+	if singlePipeFlag != "" {
+		var spec *testSpec
+		testFile := fmt.Sprintf("%s.test.json", singlePipeFlag)
+		if _, err := os.Stat(fmt.Sprintf("expected/%s", testFile)); os.IsNotExist(err) {
+			if !update {
+				return nil, fmt.Errorf("no test spec: %s", testFile)
+			}
+			spec, err = createMissingSpec(singlePipeFlag)
+
+			if err != nil {
+				return nil, err
+			}
+		}
+		spec, err = loadSpec(testFile)
+		if err != nil {
+			return nil, err
+		}
+		err = handleSingle(conn, spec, update)
+		if err != nil {
+			return []error{fmt.Errorf("%s: %s", singlePipeFlag, err)}, nil
+		}
+		return []error{}, nil
+	}
+	specs, err := getSpecs(true)
+	if err != nil {
+		return nil, err
+	}
+	errors := []error{}
+	for _, spec := range specs {
+		err := handleSingle(conn, spec, update)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("%s: %s", spec.Id, err))
+		}
+	}
+	return errors, nil
+}
+
+func update() error {
+	_, err := handle(true)
+	return err
+}
+
+func verify() (error) {
+	errors, err := handle(false)
+	if err != nil {
+		return err
+	}
+	if len(errors) > 0 {
+		for _, err := range errors {
+			fmt.Printf("test failed: %s\n", err)
+		}
+		return fmt.Errorf("%d tests failed", len(errors))
 	}
 	return nil
 }
@@ -158,27 +414,38 @@ func (a byId) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a byId) Less(i, j int) bool { return a[i]["_id"].(string) < a[j]["_id"].(string) }
 
 type testSpec struct {
-	Ignore    bool     `json:"ignore"`
-	Blacklist []string `json:"blacklist"`
-	File      string   `json:"file"`
+	Id                string   `json:"_id"`
+	Ignore            bool     `json:"ignore"`
+	Blacklist         []string `json:"blacklist"`
+	File              string   `json:"file"`
 	CompiledBlacklist []*regexp.Regexp
+	Pipe              string            `json:"pipe"`
+	Endpoint            string            `json:"endpoint"`
+	Parameters        map[string]string `json:"parameters"`
 }
 
-func loadSpec(pipe *Pipe, spec *testSpec) error {
-	file := fmt.Sprintf("./expected/%s.test.json", pipe.Id)
-	if _, err := os.Stat(file); !os.IsNotExist(err) {
-		raw, err := ioutil.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		json.Unmarshal(raw, spec)
+func loadSpec(f string) (*testSpec, error) {
+	// defaults
+	name := strings.TrimSuffix(f, ".test.json")
+	spec := testSpec{
+		Id:     name,
+		File:   fmt.Sprintf("%s.json", name),
+		Endpoint: "json",
+		Pipe:   name,
 	}
-	err := spec.compileBlacklist()
+	raw, err := ioutil.ReadFile(fmt.Sprintf("./expected/%s", f))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// file is optional, defaults applies
-	return nil
+	err = json.Unmarshal(raw, &spec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse test spec: %s", err)
+	}
+	err = spec.compileBlacklist()
+	if err != nil {
+		return nil, err
+	}
+	return &spec, nil
 }
 
 func (spec testSpec) isBlacklisted(path []string) bool {
@@ -190,14 +457,15 @@ func (spec testSpec) isBlacklisted(path []string) bool {
 	}
 	return false
 }
+
 // foo.bar -> foo\.bar
 // foo[].bar -> foo.*.bar
 func fixSyntax(i string) string {
 	// the jq implementation used foo[].bar syntax when foo was a dict of objects (typically keys to new objects)
 	i = strings.Replace(i, "[].", ".*.", -1)
 	// create a regex, foo.*.bar -> ^foo\..*\.bar (the alternative would be that the end user typed regex directly)
-	i = strings.Replace(i,".", "\\.", -1)
-	i = strings.Replace(i,"*", ".*", -1)
+	i = strings.Replace(i, ".", "\\.", -1)
+	i = strings.Replace(i, "*", ".*", -1)
 	return "^" + i
 }
 
@@ -214,15 +482,21 @@ func (spec *testSpec) compileBlacklist() error {
 	return nil
 }
 
-func normalizeList(spec testSpec, entities []entity) []entity {
+func normalizeList(spec *testSpec, entities []entity) []entity {
 	var result []entity
 	for _, entity := range entities {
-		result = append(result, normalize(spec, entity, []string{}))
+		ctx := &normalizeContext{root: entity, spec: spec}
+		result = append(result, ctx.normalize(entity, []string{}))
 	}
 	return result
 }
 
-func normalize(spec testSpec, entity map[string]interface{}, parentPath []string) map[string]interface{} {
+type normalizeContext struct {
+	root entity
+	spec *testSpec
+}
+
+func (ctx normalizeContext) normalize(entity map[string]interface{}, parentPath []string) map[string]interface{} {
 	result := make(map[string]interface{})
 	for key, value := range entity {
 		path := append(parentPath, key)
@@ -231,18 +505,19 @@ func normalize(spec testSpec, entity map[string]interface{}, parentPath []string
 		} else if strings.HasPrefix(key, "_") {
 			// ignore the other internal attributes
 		} else {
-			if !spec.isBlacklisted(path) {
-				result[key] = normalizeValue(spec, value, path)
+			if !ctx.spec.isBlacklisted(path) {
+				result[key] = ctx.normalizeValue(value, path)
 			} else {
 				if verboseFlag {
-					log.Printf("Ignoring blacklisted path: %s", path)
+					log.Printf("_id %s: ignoring blacklisted path: %v ", ctx.root["_id"], path)
 				}
 			}
 		}
 	}
 	return result
 }
-func normalizeValue(spec testSpec, v interface{}, path []string) interface{} {
+
+func (ctx normalizeContext) normalizeValue(v interface{}, path []string) interface{} {
 	if v == nil {
 		return v
 	}
@@ -253,11 +528,11 @@ func normalizeValue(spec testSpec, v interface{}, path []string) interface{} {
 	case reflect.Array:
 		var fixed []interface{}
 		for _, e := range v.([]interface{}) {
-			fixed = append(fixed, normalizeValue(spec, e, path))
+			fixed = append(fixed, ctx.normalizeValue(e, path))
 		}
 		return fixed
 	case reflect.Map:
-		return normalize(spec, v.(map[string]interface{}), path)
+		return ctx.normalize(v.(map[string]interface{}), path)
 	default:
 		return v
 	}
@@ -307,10 +582,24 @@ func clean() error {
 }
 
 func upload() error {
-	// TODO implement profile, default profile is test-env.json
 	conn, err := connect()
 	if err != nil {
 		return err
+	}
+
+	profileFile := fmt.Sprintf("%s-env.json", profileFlag)
+	byte, err := ioutil.ReadFile(profileFile)
+	if err != nil {
+		return fmt.Errorf("failed to load profile %s:", profileFile)
+	}
+	var env interface{}
+	err = json.Unmarshal(byte, &env)
+	if err != nil {
+		return fmt.Errorf("failed to parse profile: %s", err)
+	}
+	err = conn.putEnv(env)
+	if err != nil {
+		return fmt.Errorf("failed to replace env: %s", err)
 	}
 
 	buf, err := zipConfig()
@@ -323,7 +612,38 @@ func upload() error {
 	if err != nil {
 		return err
 	}
+	if !customSchedulerFlag {
+		err = addDefaultScheduler(conn)
+		if err != nil {
+			return err
+		}
+	}
 	fmt.Printf("Node config replaced with local config.\n")
+	return nil
+}
+func addDefaultScheduler(conn *connection) error {
+	var scheduler []interface{}
+	err := json.Unmarshal([]byte(fmt.Sprintf(`
+[{
+ "_id": "%s",
+ "type": "system:microservice",
+ "docker": {
+  "environment": {
+    "JWT": "%s",
+    "URL": "%s"
+   },
+  "image": "%s",
+  "port": %d
+ }
+}]
+`, schedulerIdFlag, conn.Jwt, conn.Node, schedulerImage, schedulerPort)), &scheduler)
+	if err != nil {
+		return err
+	}
+	err = conn.postSystems(scheduler)
+	if err != nil {
+		return fmt.Errorf("failed to create scheduler: %s", err)
+	}
 	return nil
 }
 
@@ -620,8 +940,8 @@ func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("failed to talk to the node (got HTTP 403 Forbidden), maybe the JWT has expired?")
 	}
 
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("expected http status code 200, got: %d", resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("expected http status code 2xx, got: %d", resp.StatusCode)
 	}
 	return resp, nil
 }
@@ -717,8 +1037,96 @@ func (conn *connection) getZipConfig(dst *os.File) error {
 	return err
 }
 
-func (conn *connection) getEntities(pipe *Pipe, target *[]entity) error {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe.Id), nil)
+func (conn *connection) getEntities(pipe string, target *[]entity) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/pipes/%s/entities", conn.Node, pipe), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) getXml(pipe string, parameters map[string]string,) ([]byte, error) {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/xml", conn.Node, pipe), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return nil, fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+	bytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes, nil
+}
+
+func (conn *connection) putEnv(env interface{}) error {
+	b, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/env", conn.Node), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) postSystems(systems []interface{}) error {
+	b, err := json.Marshal(systems)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	r, err := http.NewRequest("POST", fmt.Sprintf("%s/systems", conn.Node), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) postProxyNoBody(system string, subUrl string) error {
+	r, err := http.NewRequest("POST", fmt.Sprintf("%s/systems/%s/proxy/%s", conn.Node, system, subUrl), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) getProxyJson(system string, subUrl string, target interface{}) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/system/%s/proxy/%s", conn.Node, subUrl), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)

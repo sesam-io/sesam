@@ -60,6 +60,7 @@ Verifying output (3/3)...passed!
 | ignore | If the output should be ignored during tests. | boolean | No | ``false`` |
 | endpoint | If the output should be fetched from a published endpoint instead. | string | No | By default the json is grabbed from ``/pipes/<my-pipe>/entities``
 | file | File that contains the expected results. | string | No | Name of the .test.json file without .test (e.g. foo.test.json looks for foo.json)
+| pipe | Pipe that contains the output to test. | string | No | Same as above |
 | blacklist | Properties to ignore in the output. | Array of strings | No | ``[]`` |
 | parameters | Which parameters to pass as bound parameters. Note that parameters only works for published endpoints. | Object | No | ``{}`` |
 
@@ -145,9 +146,26 @@ If the data is not located at the top level, a dotted notation is supported ``fo
 
 It is recommended to avoid ignoring or blacklisting as much as possible as this creates a false sense of correctness. Tests will pass, but deviations are silently ignored.
 
+### Scheduler customization
+
+By default the upload command will add a test-friendly scheduler as part of the configuration. The ``_id`` for this micro service system is ``scheduler``, but it can be overridden with the flag "--scheduler-id my-scheduler-id" if you need to override this.
+ 
+If you want to configure a custom scheduler manually as part of the configuration you need to enable the ``--custom-scheduler`` flag.
+
+This custom scheduler needs to implement the following: 
+
+1. POST /start (the tool will call this when the scheduler should start)
+
+2. GET / (the tool will then poll this until it returns with state 'success' or 'failure')
+```
+{
+  "state": "?|success|failure" 
+}
+```
+
 ## Installing
 
-Prebuild binaries for common platforms can be downloaded from [Github Releases](https://github.com/sesam-io/sesam/releases/).
+Prebuilt binaries for common platforms can be downloaded from [Github Releases](https://github.com/sesam-io/sesam/releases/).
 
 ## Building from source
 
