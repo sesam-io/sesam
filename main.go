@@ -131,7 +131,7 @@ func run() error {
 		if verboseFlag {
 			fmt.Printf("Checking scheduler..")
 		}
-		err = conn.getProxyJson(schedulerIdFlag, "status", &proxyStatus)
+		err = conn.getProxyJson(schedulerIdFlag, "", &proxyStatus)
 		if proxyStatus["state"] == "success" {
 			break
 		}
