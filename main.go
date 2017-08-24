@@ -127,13 +127,19 @@ func run() error {
 
 	// poll status api and display progress until finished or failed
 	var proxyStatus map[string]interface{}
+	if verboseFlag {
+		fmt.Printf("Checking scheduler")
+	}
 	for {
 		// wait 5 seconds before polling
 		time.Sleep(5000 * time.Millisecond)
 		if verboseFlag {
-			fmt.Printf("Checking scheduler..")
+			fmt.Printf(".")
 		}
 		err = conn.getProxyJson(schedulerIdFlag, "", &proxyStatus)
+		if err != nil {
+			return err
+		}
 		if proxyStatus["state"] == "success" {
 			break
 		}
@@ -607,7 +613,7 @@ func upload() error {
 	buf, err := zipConfig()
 
 	if dumpFlag {
-		fmt.Println("Dumping zip-contents to upload.zip")
+		fmt.Println("Dumping zip-")
 		err = ioutil.WriteFile("upload.zip", buf.Bytes(), 0644)
 		if err != nil {
 			return err
@@ -1136,7 +1142,7 @@ func (conn *connection) postProxyNoBody(system string, subUrl string) error {
 }
 
 func (conn *connection) getProxyJson(system string, subUrl string, target interface{}) error {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/system/%s/proxy/%s", conn.Node, subUrl), nil)
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/systems/%s/proxy/%s", conn.Node, system, subUrl), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
