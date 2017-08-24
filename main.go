@@ -54,6 +54,7 @@ var profileFlag string
 var runsFlag int
 var customSchedulerFlag bool
 var schedulerIdFlag string
+var dumpFlag bool
 const schedulerImage = "sesamcommunity/scheduler:latest"
 const schedulerPort = 5000
 
@@ -62,6 +63,7 @@ const buildDir = "build"
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
+	flag.BoolVar(&dumpFlag, "dump", false, "dump zip content to disk")
 	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
 	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
@@ -603,6 +605,14 @@ func upload() error {
 	}
 
 	buf, err := zipConfig()
+
+	if dumpFlag {
+		fmt.Println("Dumping zip-contents to upload.zip")
+		err = ioutil.WriteFile("upload.zip", buf.Bytes(), 0644)
+		if err != nil {
+			return err
+		}
+	}
 
 	if err != nil {
 		return err
