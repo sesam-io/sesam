@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"net/url"
 )
 
 func myUsage() {
@@ -1070,7 +1071,11 @@ func (conn *connection) getEntities(pipe string, target *[]entity) error {
 }
 
 func (conn *connection) getXml(pipe string, parameters map[string]string,) ([]byte, error) {
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/xml", conn.Node, pipe), nil)
+	v := url.Values{}
+	for k, p := range parameters {
+		v.Add(k, p)
+	}
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/xml?%s", conn.Node, pipe, v.Encode()), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return nil, fmt.Errorf("unable to create request: %v", err)
