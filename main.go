@@ -257,7 +257,7 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 	// TODO store actual output if debugFlag is enabled and tests fails
 	file := fmt.Sprintf("expected/%s", spec.File)
 	if spec.Ignore {
-		if _, err := os.Stat(file); os.IsNotExist(err) {
+		if _, err := os.Stat(file); !os.IsNotExist(err) {
 			if update {
 				err := os.Remove(file)
 				if err != nil {
@@ -380,7 +380,7 @@ func handle(update bool) ([]error, error) {
 		}
 		return []error{}, nil
 	}
-	specs, err := getSpecs(true)
+	specs, err := getSpecs(update)
 	if err != nil {
 		return nil, err
 	}
