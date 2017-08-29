@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 	"strings"
 	"time"
 	"net/url"
+	"github.com/beevik/etree"
 )
 
 func myUsage() {
@@ -312,44 +312,41 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 			}
 			return nil
 		}
-	case "xml":
-		bytes, err := conn.getXml(spec.Pipe, spec.Parameters)
+	default:
+		actual, err := conn.getPub(spec.Pipe, spec.Parameters, spec.Endpoint)
 		if err != nil {
-			return fmt.Errorf("xml failed for %s: %s", spec.Pipe, err)
-		}
-		var entities interface{}
-		err = xml.Unmarshal(bytes, &entities)
-		if err != nil {
-			return fmt.Errorf("failed to parse xml: %s", err)
+			return fmt.Errorf("failed to get data for %s: %s", spec.Pipe, err)
 		}
 
-		// normalize if needed here
+		if spec.Endpoint == "xml" {
+			doc := etree.NewDocument()
+			if err := doc.ReadFromBytes(actual); err != nil {
+				return err
+			}
+			doc.Indent(2)
+			actual, err = doc.WriteToBytes()
+			if err != nil {
+				return err
+			}
+		}
 
 		if update {
-			bytes, _ := xml.MarshalIndent(entities, "", "  ")
-			err = ioutil.WriteFile(file, bytes, 0644)
+			err = ioutil.WriteFile(file, actual, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
 			}
 			return nil
 		} else {
-			var expectedEntities interface{}
-			raw, err := ioutil.ReadFile(file)
+			expected, err := ioutil.ReadFile(file)
 			if err != nil {
 				return err
 			}
-			err = xml.Unmarshal(raw, &expectedEntities)
-			if err != nil {
-				return fmt.Errorf("failed to parse expected xml %s", err)
-			}
-			if !reflect.DeepEqual(entities, expectedEntities) {
+			if !reflect.DeepEqual(actual, expected) {
 				// TODO report with channels
-				return fmt.Errorf("xml content mismatch: expected %d got %d", expectedEntities, entities)
+				return fmt.Errorf("content mismatch: expected %s got %s", expected, actual)
 			}
 			return nil
 		}
-	default:
-		return fmt.Errorf("support for format %s not implemented yet", spec.Endpoint)
 	}
 }
 
@@ -410,6 +407,8 @@ func verify() (error) {
 			fmt.Printf("test failed: %s\n", err)
 		}
 		return fmt.Errorf("%d tests failed", len(errors))
+	} else {
+		fmt.Printf("All tests passed!")
 	}
 	return nil
 }
@@ -1070,12 +1069,12 @@ func (conn *connection) getEntities(pipe string, target *[]entity) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
-func (conn *connection) getXml(pipe string, parameters map[string]string,) ([]byte, error) {
+func (conn *connection) getPub(pipe string, parameters map[string]string, pub string) ([]byte, error) {
 	v := url.Values{}
 	for k, p := range parameters {
 		v.Add(k, p)
 	}
-	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/xml?%s", conn.Node, pipe, v.Encode()), nil)
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/publishers/%s/%s?%s", conn.Node, pipe, pub, v.Encode()), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return nil, fmt.Errorf("unable to create request: %v", err)
