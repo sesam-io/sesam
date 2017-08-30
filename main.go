@@ -120,8 +120,31 @@ func run() error {
 		return err
 	}
 
+	if verboseFlag {
+		fmt.Printf("Loading scheduler")
+	}
+	var systemStatus map[string]interface{}
+	// wait for microservice to spin up
+	for {
+		// wait 5 seconds before polling
+		time.Sleep(5000 * time.Millisecond)
+		if verboseFlag {
+			fmt.Printf(".")
+		}
+		err = conn.getSystemStatus(schedulerIdFlag, &systemStatus)
+		if err != nil {
+			return err
+		}
+		if systemStatus["running"] == true {
+			break
+		}
+	}
+	if verboseFlag {
+		fmt.Printf("done!\n")
+	}
+
 	// start microservice using proxy api
-	err = conn.postProxyNoBody(schedulerIdFlag, "start")
+	err = conn.postProxyNoBody(schedulerIdFlag, "start?reset_pipes=true&delete_datasets=true")
 	if err != nil {
 		return fmt.Errorf("failed to start scheduler: %s", err)
 	}
@@ -129,7 +152,7 @@ func run() error {
 	// poll status api and display progress until finished or failed
 	var proxyStatus map[string]interface{}
 	if verboseFlag {
-		fmt.Printf("Checking scheduler")
+		fmt.Printf("Running scheduler")
 	}
 	for {
 		// wait 5 seconds before polling
@@ -147,6 +170,9 @@ func run() error {
 		if proxyStatus["state"] == "failed" {
 			return fmt.Errorf("scheduler failed, check the scheduler log and pipe execution datasets in the node")
 		}
+	}
+	if verboseFlag {
+		fmt.Printf("done!\n")
 	}
 	return nil
 }
@@ -1143,6 +1169,23 @@ func (conn *connection) postProxyNoBody(system string, subUrl string) error {
 		return err
 	}
 	return nil
+}
+
+
+func (conn *connection) getSystemStatus(system string, target interface{}) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/systems/%s/status", conn.Node, system), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
 }
 
 func (conn *connection) getProxyJson(system string, subUrl string, target interface{}) error {
