@@ -48,6 +48,7 @@ Options:
 var Version string
 
 var verboseFlag bool
+var extraVerboseFlag bool
 var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
@@ -64,6 +65,7 @@ const buildDir = "build"
 func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
+	flag.BoolVar(&extraVerboseFlag, "vv", false, "be extra verbose")
 	flag.BoolVar(&dumpFlag, "dump", false, "dump zip content to disk")
 	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
 	flag.StringVar(&nodeFlag, "node", "", "service url")
@@ -84,6 +86,9 @@ func main() {
 	if len(args) == 0 {
 		flag.Usage()
 		return
+	}
+	if extraVerboseFlag {
+		verboseFlag = true
 	}
 	var err error
 	command := args[0]
@@ -121,7 +126,7 @@ func run() error {
 	}
 
 	if verboseFlag {
-		fmt.Printf("Loading scheduler")
+		fmt.Printf("Loading scheduler..")
 	}
 	var systemStatus map[string]interface{}
 	// wait for microservice to spin up
@@ -152,7 +157,7 @@ func run() error {
 	// poll status api and display progress until finished or failed
 	var proxyStatus map[string]interface{}
 	if verboseFlag {
-		fmt.Printf("Running scheduler")
+		fmt.Printf("Running scheduler..")
 	}
 	for {
 		// wait 5 seconds before polling
@@ -542,7 +547,7 @@ func (ctx normalizeContext) normalize(entity map[string]interface{}, parentPath 
 			if !ctx.spec.isBlacklisted(path) {
 				result[key] = ctx.normalizeValue(value, path)
 			} else {
-				if verboseFlag {
+				if extraVerboseFlag {
 					log.Printf("_id %s: ignoring blacklisted path: %v ", ctx.root["_id"], path)
 				}
 			}
@@ -970,7 +975,7 @@ func connect() (*connection, error) {
 func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	client := &http.Client{}
 	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", conn.Jwt))
-	if verboseFlag {
+	if extraVerboseFlag {
 		log.Printf("%v: %v\n", r.Method, r.URL)
 	}
 	resp, err := client.Do(r)
