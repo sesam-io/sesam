@@ -1148,7 +1148,6 @@ func (conn *connection) postSystems(systems []interface{}) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(b))
 	r, err := http.NewRequest("POST", fmt.Sprintf("%s/systems", conn.Node), bytes.NewBuffer(b))
 	if err != nil {
 		// shouldn't happen if connection is sane
