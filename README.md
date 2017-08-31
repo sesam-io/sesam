@@ -208,4 +208,18 @@ sesam version 0.0.8
 ## Known issues
 
 * JSON encoder escapes <, > and & as \uxxxx
-* JSON encoder doesn't add a trailing newline to end of file
+* install-latest.sh fails with the follow error when a new relase is being built as the release is created before the artifacts are uploaded:
+ ```
+ $ bash <(curl -s https://raw.githubusercontent.com/sesam-io/sesam/master/install-latest.sh)
+ +curl -s https://api.github.com/repos/sesam-io/sesam/releases/latest
+ +egrep -o '/sesam-io/sesam/releases/download/.*/.*.linux-amd64.tar.gz'
+ +wget --base=http://github.com -i - -O sesam.tar.gz
+ No URLs found in -.
+ +tar -xf sesam.tar.gz
+ tar: This does not look like a tar archive
+ gzip: stdin: unexpected end of file
+ tar: Child returned status 1
+ tar: Error is not recoverable: exiting now
+ +./sesam -version
+ /dev/fd/63: line 4: ./sesam: No such file or directory
+ ```
