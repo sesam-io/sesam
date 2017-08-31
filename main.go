@@ -286,8 +286,12 @@ func createMissingSpec(pipe string) (*testSpec, error) {
 }
 
 func handleSingle(conn *connection, spec *testSpec, update bool) error {
-	// TODO store actual output if debugFlag is enabled and tests fails
 	file := fmt.Sprintf("expected/%s", spec.File)
+
+	dir := filepath.Join(buildDir, "verify")
+	expected := filepath.Join(dir, fmt.Sprintf("expected/%s", spec.File))
+	actual := filepath.Join(dir, fmt.Sprintf("actual/%s", spec.File))
+
 	if spec.Ignore {
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
 			if update {
@@ -315,26 +319,36 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 		sort.Sort(byId(entities))
 
 		if update {
-			var bytes []byte
-			if len(entities) == 0 {
-				// empty array is serialized to null because empty array is and nil is the same
-				bytes = []byte("[]")
-			} else {
-				bytes, _ = json.MarshalIndent(entities, "", "  ")
+			bytes, err := renderJson(entities)
+			if err != nil {
+				return fmt.Errorf("failed to generate json %s: %s", file, err)
 			}
-			// append newline (old tool used to do that)
-			bytes = append(bytes, byte('\n'))
 			err = ioutil.WriteFile(file, bytes, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
 			}
 			return nil
 		} else {
+			bytes, err := renderJson(entities)
+			if err != nil {
+				return fmt.Errorf("failed to generate json %s: %s", file, err)
+			}
+			err = ioutil.WriteFile(actual, bytes, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to write actual data to file %s: %s", actual, err)
+			}
+
 			expectedEntities := []entity{}
 			raw, err := ioutil.ReadFile(file)
 			if err != nil {
 				return err
 			}
+
+			err = ioutil.WriteFile(expected, raw, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to copy expected data to file %s: %s", expected, err)
+			}
+
 			err = json.Unmarshal(raw, &expectedEntities)
 			if err != nil {
 				return fmt.Errorf("failed to parse expected entities %s", err)
@@ -387,6 +401,22 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 			return nil
 		}
 	}
+}
+func renderJson(entities []entity) ([]byte, error) {
+	var bytes []byte
+	var err error
+	if len(entities) == 0 {
+		// empty array is serialized to null because empty array is and nil is the same
+		bytes = []byte("[]")
+	} else {
+		bytes, err = json.MarshalIndent(entities, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+	}
+	// append newline (old tool used to do that)
+	bytes = append(bytes, byte('\n'))
+	return bytes, nil
 }
 
 func handle(update bool) ([]error, error) {
