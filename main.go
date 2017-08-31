@@ -245,7 +245,7 @@ func getSpecs(update bool) ([]*testSpec, error) {
 		if strings.HasSuffix(f.Name(), ".test.json") {
 			spec, err := loadSpec(f.Name())
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("failed to load spec %s: %s", f.Name(), err)
 			}
 			if !pipes[spec.Pipe] {
 				return nil, fmt.Errorf("test references non-existing pipe %s, remove %s", spec.Pipe, f.Name())
@@ -476,6 +476,8 @@ func loadSpec(f string) (*testSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	// remove BOM
+	raw = bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
 	err = json.Unmarshal(raw, &spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse test spec: %s", err)
