@@ -274,7 +274,7 @@ func createMissingSpec(pipe string) (*testSpec, error) {
 		log.Printf("Creating missing placeholder test spec for pipe: %s", pipe)
 	}
 	specName := fmt.Sprintf("./expected/%s.test.json", pipe)
-	err := ioutil.WriteFile(specName, []byte("{\n}"), 0644)
+	err := ioutil.WriteFile(specName, []byte("{\n}\n"), 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create missing spec file: %s", err)
 	}
@@ -315,7 +315,15 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 		sort.Sort(byId(entities))
 
 		if update {
-			bytes, _ := json.MarshalIndent(entities, "", "  ")
+			var bytes []byte
+			if len(entities) == 0 {
+				// empty array is serialized to null because empty array is and nil is the same
+				bytes = []byte("[]")
+			} else {
+				bytes, _ = json.MarshalIndent(entities, "", "  ")
+			}
+			// append newline (old tool used to do that)
+			bytes = append(bytes, byte('\n'))
 			err = ioutil.WriteFile(file, bytes, 0644)
 			if err != nil {
 				return fmt.Errorf("failed to updated expected file %s: %s", file, err)
