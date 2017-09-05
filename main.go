@@ -125,6 +125,15 @@ func run() error {
 		return err
 	}
 
+	if !customSchedulerFlag {
+		err = addDefaultScheduler(conn)
+		defer removeDefaultScheduler(conn)
+		if err != nil {
+			return err
+		}
+	}
+
+
 	if verboseFlag {
 		fmt.Printf("Loading scheduler..")
 	}
@@ -669,15 +678,18 @@ func upload() error {
 	if err != nil {
 		return err
 	}
-	if !customSchedulerFlag {
-		err = addDefaultScheduler(conn)
-		if err != nil {
-			return err
-		}
-	}
 	fmt.Printf("Node config replaced with local config.\n")
 	return nil
 }
+
+func removeDefaultScheduler(conn *connection) error {
+	err := conn.deleteSystem(schedulerIdFlag)
+	if err != nil {
+		return fmt.Errorf("failed to remove scheduler: %s", err)
+	}
+	return nil
+}
+
 func addDefaultScheduler(conn *connection) error {
 	var scheduler []interface{}
 	err := json.Unmarshal([]byte(fmt.Sprintf(`
@@ -1147,6 +1159,19 @@ func (conn *connection) putEnv(env interface{}) error {
 	}
 	r.Header.Add("Content-Type", "application/json")
 
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) deleteSystem(system string) error {
+	r, err := http.NewRequest("DELETE", fmt.Sprintf("%s/systems/%s", conn.Node, system), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
 	_, err = conn.doRequest(r)
 	if err != nil {
 		return err
