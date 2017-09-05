@@ -881,7 +881,8 @@ func zipConfig() (*bytes.Buffer, error) {
 		if path == "node-metadata.conf.json" {
 			return true
 		}
-		if !strings.HasPrefix(path, "pipes/") && !strings.HasPrefix(path, "systems/") {
+		dir := filepath.Dir(path)
+		if !strings.HasPrefix(dir, "pipes") && !strings.HasPrefix(dir, "systems") {
 			return false
 		}
 		return strings.HasSuffix(path, ".conf.json")
