@@ -126,13 +126,12 @@ func run() error {
 	}
 
 	if verboseFlag {
-		fmt.Printf("Loading scheduler..")
+		fmt.Printf("Loading scheduler.")
 	}
 	var systemStatus map[string]interface{}
 	// wait for microservice to spin up
+	time.Sleep(1000 * time.Millisecond)
 	for {
-		// wait 5 seconds before polling
-		time.Sleep(5000 * time.Millisecond)
 		if verboseFlag {
 			fmt.Printf(".")
 		}
@@ -143,6 +142,31 @@ func run() error {
 		if systemStatus["running"] == true {
 			break
 		}
+		// wait 5 seconds before next poll
+		time.Sleep(5000 * time.Millisecond)
+	}
+	if verboseFlag {
+		fmt.Printf("done!\n")
+	}
+
+	if verboseFlag {
+		fmt.Printf("Waiting for scheduler to respond.")
+	}
+
+	var proxyStatus map[string]interface{}
+	// wait for microservice to respond to requests without the node failing
+	time.Sleep(1000 * time.Millisecond)
+	for {
+		if verboseFlag {
+			fmt.Printf(".")
+		}
+		err = conn.getProxyJson(schedulerIdFlag, "", &proxyStatus)
+		if err == nil {
+			// no error, microservice is responding
+			break;
+		}
+		// wait 5 seconds before next poll
+		time.Sleep(5000 * time.Millisecond)
 	}
 	if verboseFlag {
 		fmt.Printf("done!\n")
@@ -155,13 +179,10 @@ func run() error {
 	}
 
 	// poll status api and display progress until finished or failed
-	var proxyStatus map[string]interface{}
 	if verboseFlag {
 		fmt.Printf("Running scheduler..")
 	}
 	for {
-		// wait 5 seconds before polling
-		time.Sleep(5000 * time.Millisecond)
 		if verboseFlag {
 			fmt.Printf(".")
 		}
@@ -175,6 +196,8 @@ func run() error {
 		if proxyStatus["state"] == "failed" {
 			return fmt.Errorf("scheduler failed, check the scheduler log and pipe execution datasets in the node")
 		}
+		// wait 5 seconds before next poll
+		time.Sleep(5000 * time.Millisecond)
 	}
 	if verboseFlag {
 		fmt.Printf("done!\n")
