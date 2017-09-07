@@ -127,10 +127,10 @@ func run() error {
 
 	if !customSchedulerFlag {
 		err = addDefaultScheduler(conn)
-		defer removeDefaultScheduler(conn)
 		if err != nil {
 			return err
 		}
+		defer removeDefaultScheduler(conn)
 	}
 
 
@@ -139,7 +139,6 @@ func run() error {
 	}
 	var systemStatus map[string]interface{}
 	// wait for microservice to spin up
-	time.Sleep(1000 * time.Millisecond)
 	for {
 		if verboseFlag {
 			fmt.Printf(".")
@@ -164,7 +163,6 @@ func run() error {
 
 	var proxyStatus map[string]interface{}
 	// wait for microservice to respond to requests without the node failing
-	time.Sleep(1000 * time.Millisecond)
 	for {
 		if verboseFlag {
 			fmt.Printf(".")
