@@ -173,7 +173,7 @@ func run() error {
 	}
 
 	// start microservice using proxy api
-	err = conn.postProxyNoBody(schedulerIdFlag, "start?reset_pipes=true&delete_datasets=true")
+	err = conn.postProxyNoBody(schedulerIdFlag, "start?reset_pipes=true&delete_datasets=true&compact_execution_datasets=true")
 	if err != nil {
 		return fmt.Errorf("failed to start scheduler: %s", err)
 	}
