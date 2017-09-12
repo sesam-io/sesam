@@ -125,12 +125,20 @@ func run() error {
 		return err
 	}
 
+	if !customSchedulerFlag {
+		err = addDefaultScheduler(conn)
+		if err != nil {
+			return err
+		}
+		defer removeDefaultScheduler(conn)
+	}
+
+
 	if verboseFlag {
 		fmt.Printf("Loading scheduler.")
 	}
 	var systemStatus map[string]interface{}
 	// wait for microservice to spin up
-	time.Sleep(1000 * time.Millisecond)
 	for {
 		if verboseFlag {
 			fmt.Printf(".")
@@ -155,7 +163,6 @@ func run() error {
 
 	var proxyStatus map[string]interface{}
 	// wait for microservice to respond to requests without the node failing
-	time.Sleep(1000 * time.Millisecond)
 	for {
 		if verboseFlag {
 			fmt.Printf(".")
@@ -692,15 +699,18 @@ func upload() error {
 	if err != nil {
 		return err
 	}
-	if !customSchedulerFlag {
-		err = addDefaultScheduler(conn)
-		if err != nil {
-			return err
-		}
-	}
 	fmt.Printf("Node config replaced with local config.\n")
 	return nil
 }
+
+func removeDefaultScheduler(conn *connection) error {
+	err := conn.deleteSystem(schedulerIdFlag)
+	if err != nil {
+		return fmt.Errorf("failed to remove scheduler: %s", err)
+	}
+	return nil
+}
+
 func addDefaultScheduler(conn *connection) error {
 	var scheduler []interface{}
 	err := json.Unmarshal([]byte(fmt.Sprintf(`
@@ -904,7 +914,8 @@ func zipConfig() (*bytes.Buffer, error) {
 		if path == "node-metadata.conf.json" {
 			return true
 		}
-		if !strings.HasPrefix(path, "pipes/") && !strings.HasPrefix(path, "systems/") {
+		dir := filepath.Dir(path)
+		if !strings.HasPrefix(dir, "pipes") && !strings.HasPrefix(dir, "systems") {
 			return false
 		}
 		return strings.HasSuffix(path, ".conf.json")
@@ -1169,6 +1180,19 @@ func (conn *connection) putEnv(env interface{}) error {
 	}
 	r.Header.Add("Content-Type", "application/json")
 
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) deleteSystem(system string) error {
+	r, err := http.NewRequest("DELETE", fmt.Sprintf("%s/systems/%s", conn.Node, system), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
 	_, err = conn.doRequest(r)
 	if err != nil {
 		return err
