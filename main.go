@@ -158,7 +158,7 @@ func run() error {
 	}
 
 	if verboseFlag {
-		fmt.Printf("Waiting for scheduler to respond.")
+		fmt.Printf("Waiting for scheduler to respond without errors.")
 	}
 
 	var proxyStatus map[string]interface{}
@@ -171,6 +171,9 @@ func run() error {
 		if err == nil {
 			// no error, microservice is responding
 			break;
+		}
+		if verboseFlag {
+			fmt.Printf("(%s)", err)
 		}
 		// wait 5 seconds before next poll
 		time.Sleep(5000 * time.Millisecond)
