@@ -31,6 +31,7 @@ func myUsage() {
 Commands:
   init	    Store a long lived JWT in current directory (not implemented yet)
   clean	    Clean the build folder
+  wipe      Wipes the data and config in the node
   upload    Replace node config with local config
   download  Replace local config with node config
   status    Compare node config with local config (requires external diff command)
@@ -110,6 +111,8 @@ func main() {
 		err = test()
 	case "run":
 		err = run()
+	case "wipe":
+		err = wipe()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		flag.Usage()
@@ -118,6 +121,52 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s failed: %s\n", command, err)
 		os.Exit(1)
 	}
+}
+func wipe() error {
+	conn, err := connect()
+	if err != nil {
+		return err
+	}
+	emptyConfig := make([]interface{}, 0)
+	err = conn.putConfig(emptyConfig)
+	if err != nil {
+		return fmt.Errorf("failed to wipe config: %s", err)
+	}
+	if verboseFlag {
+		fmt.Printf("Removed configuration.")
+	}
+	empty := make(map[string]interface{})
+	err = conn.putEnv(empty)
+	if err != nil {
+		return fmt.Errorf("failed to wipe environment variables: %s", err)
+	}
+	if verboseFlag {
+		fmt.Printf("Removed environment variables.")
+	}
+	err = conn.putSecrets(empty)
+	if err != nil {
+		return fmt.Errorf("failed to wipe secrets: %s", err)
+	}
+	if verboseFlag {
+		fmt.Printf("Removed secrets.")
+	}
+	var datasets []Dataset
+	err = conn.getDatasets(&datasets)
+	if err != nil {
+		return fmt.Errorf("failed to get list of datasets: %s", err)
+	}
+	for _, dataset := range datasets {
+		if !strings.HasPrefix(dataset.Id, "system:") {
+			err = conn.deleteDataset(dataset.Id)
+			if err != nil {
+				return fmt.Errorf("failed to delete dataset %s: %s", dataset.Id, err)
+			}
+		}
+	}
+	if verboseFlag {
+		fmt.Printf("Removed datasets.")
+	}
+	return nil
 }
 
 func run() error {
@@ -1125,6 +1174,10 @@ type PipeConfigBlock struct {
 	Effective PipeConfig `json:"effective"`
 }
 
+type Dataset struct {
+	Id string `json:"_id"`
+}
+
 type Pipe struct {
 	Id     string          `json:"_id"`
 	Config PipeConfigBlock `json:"config"`
@@ -1144,6 +1197,41 @@ func (conn *connection) getPipes(target *[]Pipe) error {
 
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) getDatasets(target *[]Dataset) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/datasets", conn.Node), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) putConfig(config []interface{}) error {
+	b, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/config?force=true", conn.Node), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
@@ -1240,8 +1328,40 @@ func (conn *connection) putEnv(env interface{}) error {
 	return nil
 }
 
+func (conn *connection) putSecrets(env interface{}) error {
+	b, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/secrets", conn.Node), bytes.NewBuffer(b))
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	r.Header.Add("Content-Type", "application/json")
+
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (conn *connection) deleteSystem(system string) error {
 	r, err := http.NewRequest("DELETE", fmt.Sprintf("%s/systems/%s", conn.Node, system), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+	_, err = conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (conn *connection) deleteDataset(dataset string) error {
+	r, err := http.NewRequest("DELETE", fmt.Sprintf("%s/datasets/%s", conn.Node, dataset), nil)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
