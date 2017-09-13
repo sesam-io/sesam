@@ -22,6 +22,7 @@ import (
 	"time"
 	"net/url"
 	"github.com/beevik/etree"
+	"github.com/satori/go.uuid"
 )
 
 func myUsage() {
@@ -158,7 +159,7 @@ func run() error {
 	}
 
 	if verboseFlag {
-		fmt.Printf("Waiting for scheduler to respond without errors.")
+		fmt.Printf("Waiting for scheduler to respond idle without errors.")
 	}
 
 	var proxyStatus map[string]interface{}
@@ -168,12 +169,16 @@ func run() error {
 			fmt.Printf(".")
 		}
 		err = conn.getProxyJson(schedulerIdFlag, "", &proxyStatus)
-		if err == nil {
-			// no error, microservice is responding
+		if err == nil && proxyStatus["state"] == "init" {
+			// no error and not started, microservice is ready
 			break;
 		}
-		if verboseFlag {
-			fmt.Printf("(%s)", err)
+		if extraVerboseFlag {
+			if err != nil {
+				fmt.Printf("(error)", err)
+			} else {
+				fmt.Printf("(previous container: %s)", proxyStatus["state"])
+			}
 		}
 		// wait 5 seconds before next poll
 		time.Sleep(5000 * time.Millisecond)
@@ -626,6 +631,25 @@ func download() error {
 		return err
 	}
 
+	// clean up system if still present
+	if !customSchedulerFlag {
+		var system map[string]interface{}
+		if extraVerboseFlag {
+			log.Printf("Checking if scheduler %s was left in the node", schedulerIdFlag)
+		}
+		err := conn.getSystem(schedulerIdFlag, &system)
+		if err != nil {
+			return fmt.Errorf("failed to get scheduler system, aborting: %s", err)
+		}
+		if _, ok := system["_id"]; ok {
+			err := removeDefaultScheduler(conn)
+			if err != nil {
+				return fmt.Errorf("failed to remove scheduler: %s", err)
+			}
+		}
+	}
+
+
 	tmp, err := ioutil.TempFile("", "sesam")
 	if err != nil {
 		return err
@@ -707,6 +731,9 @@ func upload() error {
 }
 
 func removeDefaultScheduler(conn *connection) error {
+	if verboseFlag {
+		log.Printf("Removing scheduler: %s", schedulerIdFlag)
+	}
 	err := conn.deleteSystem(schedulerIdFlag)
 	if err != nil {
 		return fmt.Errorf("failed to remove scheduler: %s", err)
@@ -723,16 +750,21 @@ func addDefaultScheduler(conn *connection) error {
  "docker": {
   "environment": {
     "JWT": "%s",
-    "URL": "%s"
+    "URL": "%s",
+    "DUMMY": "%s"
    },
   "image": "%s",
   "port": %d
  }
 }]
-`, schedulerIdFlag, conn.Jwt, conn.Node, schedulerImage, schedulerPort)), &scheduler)
+`, schedulerIdFlag, conn.Jwt, conn.Node, uuid.NewV4(), schedulerImage, schedulerPort)), &scheduler)
 	if err != nil {
 		return err
 	}
+	if extraVerboseFlag {
+		log.Printf("Scheduler:g %s", scheduler)
+	}
+
 	err = conn.postSystems(scheduler)
 	if err != nil {
 		return fmt.Errorf("failed to create scheduler: %s", err)
@@ -1020,6 +1052,16 @@ func connect() (*connection, error) {
 }
 
 func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
+	resp, err := conn.doRawRequest(r)
+	err = assert2xx(resp)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// do request without asserting response code
+func (conn *connection) doRawRequest(r *http.Request) (*http.Response, error) {
 	client := &http.Client{}
 	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", conn.Jwt))
 	if extraVerboseFlag {
@@ -1029,15 +1071,23 @@ func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to do request: %v", err)
 	}
-
-	if resp.StatusCode == 403 {
-		return nil, fmt.Errorf("failed to talk to the node (got HTTP 403 Forbidden), maybe the JWT has expired?")
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("expected http status code 2xx, got: %d", resp.StatusCode)
+	if err != nil {
+		return nil, err
 	}
 	return resp, nil
+}
+
+func assert2xx(resp *http.Response) error {
+	if resp.StatusCode == 500 {
+		return fmt.Errorf("node failed (got 500), check the node log for possible bugs? %s", resp.Status)
+	}
+	if resp.StatusCode == 403 {
+		return fmt.Errorf("failed to talk to the node (got HTTP 403 Forbidden), maybe the JWT has expired? %s", resp.Status)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("expected http status code 2xx, got: %d (%s)", resp.StatusCode, resp.Status)
+	}
+	return nil
 }
 
 type Pipetype int
@@ -1264,6 +1314,28 @@ func (conn *connection) getProxyJson(system string, subUrl string, target interf
 		return err
 	}
 
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) getSystem(system string, target interface{}) error {
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/systems/%s", conn.Node, system), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRawRequest(r)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == 404 {
+		return nil
+	}
+	err = assert2xx(resp)
+	if err != nil {
+		return err
+	}
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(target)
 }
