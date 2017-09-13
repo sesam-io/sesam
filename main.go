@@ -373,6 +373,9 @@ func createMissingSpec(pipe string) (*testSpec, error) {
 }
 
 func handleSingle(conn *connection, spec *testSpec, update bool) error {
+	if verboseFlag {
+		fmt.Printf("Running test: %s\n", spec.Id)
+	}
 	// TODO store actual output if debugFlag is enabled and tests fails
 	file := fmt.Sprintf("expected/%s", spec.File)
 	if spec.Ignore {
@@ -427,7 +430,6 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 				return fmt.Errorf("failed to parse expected entities %s", err)
 			}
 			if len(entities) != len(expectedEntities) {
-				// TODO report with channels
 				return fmt.Errorf("length mismatch: expected %d got %d", len(expectedEntities), len(entities))
 			}
 			for idx, entity := range entities {
@@ -468,7 +470,6 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 				return err
 			}
 			if !reflect.DeepEqual(actual, expected) {
-				// TODO report with channels
 				return fmt.Errorf("content mismatch: expected %s got %s", expected, actual)
 			}
 			return nil
@@ -726,8 +727,6 @@ func clean() error {
 	if err != nil {
 		return err
 	}
-	// TODO wipe old config from node?
-
 	dir := filepath.Join(buildDir)
 	err = os.RemoveAll(dir)
 	if err != nil {
