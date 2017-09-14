@@ -1078,8 +1078,8 @@ func coalesce(list []string) string {
 func connect() (*connection, error) {
 	r := &parseResult{}
 	f, err := loadSyncConfig()
-	defer f.Close()
 	if err == nil {
+		defer f.Close()
 		// file exists
 		parseErr := parseSyncConfig(r, f)
 		if parseErr != nil {
