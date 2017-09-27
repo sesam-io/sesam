@@ -1120,9 +1120,7 @@ func coalesce(list []string) string {
 	return ""
 }
 
-// loads connection from .syncconfig in current directory if not overridden by env variables
-// TODO should walk up path to find file?
-// TODO rename file to .sesam/config and use INI-style sections?
+// loads connection from .syncconfig in current directory or closest parent directory if not overridden by env variables
 func connect() (*connection, error) {
 	r := &parseResult{}
 	workDir, err := os.Getwd()
