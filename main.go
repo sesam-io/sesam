@@ -31,7 +31,7 @@ func myUsage() {
 Commands:
   init	    Store a long lived JWT in current directory (not implemented yet)
   clean	    Clean the build folder
-  wipe      Deletes all the pipes, systems, user datasets, secrets and environment variables in the node
+  wipe      Deletes all the pipes, systems, user datasets and environment variables in the node
   upload    Replace node config with local config
   download  Replace local config with node config
   status    Compare node config with local config (requires external diff command)
@@ -133,7 +133,7 @@ func wipe() error {
 		return fmt.Errorf("failed to wipe config: %s", err)
 	}
 	if verboseFlag {
-		fmt.Printf("Removed pipes and systems.")
+		fmt.Printf("Removed pipes and systems.\n")
 	}
 	empty := make(map[string]interface{})
 	err = conn.putEnv(empty)
@@ -141,14 +141,7 @@ func wipe() error {
 		return fmt.Errorf("failed to wipe environment variables: %s", err)
 	}
 	if verboseFlag {
-		fmt.Printf("Removed environment variables.")
-	}
-	err = conn.putSecrets(empty)
-	if err != nil {
-		return fmt.Errorf("failed to wipe secrets: %s", err)
-	}
-	if verboseFlag {
-		fmt.Printf("Removed secrets.")
+		fmt.Printf("Removed environment variables.\n")
 	}
 	var datasets []Dataset
 	err = conn.getDatasets(&datasets)
@@ -164,7 +157,7 @@ func wipe() error {
 		}
 	}
 	if verboseFlag {
-		fmt.Printf("Removed datasets.")
+		fmt.Printf("Removed datasets.\n")
 	}
 	return nil
 }
