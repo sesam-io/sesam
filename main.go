@@ -31,7 +31,7 @@ func myUsage() {
 Commands:
   init	    Store a long lived JWT in current directory (not implemented yet)
   clean	    Clean the build folder
-  wipe      Wipes the data and config in the node
+  wipe      Deletes all the pipes, systems, user datasets, secrets and environment variables in the node
   upload    Replace node config with local config
   download  Replace local config with node config
   status    Compare node config with local config (requires external diff command)
@@ -133,7 +133,7 @@ func wipe() error {
 		return fmt.Errorf("failed to wipe config: %s", err)
 	}
 	if verboseFlag {
-		fmt.Printf("Removed configuration.")
+		fmt.Printf("Removed pipes and systems.")
 	}
 	empty := make(map[string]interface{})
 	err = conn.putEnv(empty)
