@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -59,6 +58,8 @@ var runsFlag int
 var customSchedulerFlag bool
 var schedulerIdFlag string
 var dumpFlag bool
+var printSchedulerLogFlag bool
+var schedulerPollFreqFlag int
 const schedulerImage = "sesamcommunity/scheduler:latest"
 const schedulerPort = 5000
 
@@ -69,6 +70,7 @@ func main() {
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
 	flag.BoolVar(&extraVerboseFlag, "vv", false, "be extra verbose")
 	flag.BoolVar(&dumpFlag, "dump", false, "dump zip content to disk")
+	flag.BoolVar(&printSchedulerLogFlag, "print-scheduler-log", false, "print scheduler log during run")
 	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
 	flag.StringVar(&nodeFlag, "node", "", "service url")
 	flag.StringVar(&jwtFlag, "jwt", "", "authorization token")
@@ -76,6 +78,7 @@ func main() {
 	flag.StringVar(&profileFlag, "profile", "test", "env profile to use <profile>-env.json")
 	flag.StringVar(&schedulerIdFlag, "scheduler-id", "scheduler", "system id for the scheduler system")
 	flag.IntVar(&runsFlag, "runs", 1, "number of test cycles to check for stability")
+	flag.IntVar(&schedulerPollFreqFlag, "scheduler-poll-frequency", 5000, "milliseconds between each poll while waiting for the scheduler")
 	flag.Usage = myUsage
 	flag.Parse()
 	if *versionPtr {
@@ -235,12 +238,37 @@ func run() error {
 		return fmt.Errorf("failed to start scheduler: %s", err)
 	}
 
+	var printLog = func (since string) (string, error) {
+		buf := new(bytes.Buffer)
+		err := conn.getSystemLog(schedulerIdFlag, since, buf)
+		if err != nil {
+			return "", err
+		}
+		scanner := bufio.NewScanner(buf)
+		for scanner.Scan() {
+			line := scanner.Text();
+			timestampedLine := strings.SplitN(line, " ", 2)
+			since = timestampedLine[0]
+			fmt.Println(timestampedLine[1])
+		}
+		return since, nil
+	}
 	// poll status api and display progress until finished or failed
 	if verboseFlag {
 		fmt.Printf("Running scheduler..")
 	}
+	if printSchedulerLogFlag {
+		fmt.Println("--- BEGIN SCHEDULER LOG ---")
+	}
+	since := ""
 	for {
-		if verboseFlag {
+		if printSchedulerLogFlag {
+			// print the actual log instead of the dots..
+			since, err = printLog(since)
+			if err != nil {
+				return err;
+			}
+		} else if verboseFlag {
 			fmt.Printf(".")
 		}
 		err = conn.getProxyJson(schedulerIdFlag, "", &proxyStatus)
@@ -251,12 +279,13 @@ func run() error {
 			break
 		}
 		if proxyStatus["state"] == "failed" {
-			return fmt.Errorf("scheduler failed, check the scheduler log and pipe execution datasets in the node")
+			return fmt.Errorf("scheduler failed, check the scheduler log (or run with -print-scheduler-log) and pipe execution datasets in the node")
 		}
-		// wait 5 seconds before next poll
-		time.Sleep(5000 * time.Millisecond)
+		time.Sleep(time.Duration(schedulerPollFreqFlag) * time.Millisecond)
 	}
-	if verboseFlag {
+	if printSchedulerLogFlag {
+		fmt.Println("--- END SCHEDULER LOG ---")
+	} else if verboseFlag {
 		fmt.Printf("done!\n")
 	}
 	return nil
@@ -285,13 +314,9 @@ func test() error {
 
 type pipeHandler func(conn *connection, pipe *Pipe) error
 
-func processOutputPipes(handler pipeHandler) error {
-	conn, err := connect()
-	if err != nil {
-		return err
-	}
+func processOutputPipes(conn *connection, handler pipeHandler) error {
 	var pipes []Pipe
-	err = conn.getPipes(&pipes)
+	err := conn.getPipes(&pipes)
 	if err != nil {
 		return fmt.Errorf("failed to get list of pipes: %s", err)
 	}
@@ -306,13 +331,13 @@ func processOutputPipes(handler pipeHandler) error {
 	return nil
 }
 
-func getSpecs(update bool) ([]*testSpec, error) {
-	files, err := ioutil.ReadDir("./expected")
+func getSpecs(conn *connection, update bool) ([]*testSpec, error) {
+	files, err := ioutil.ReadDir(filepath.Join(conn.Basedir, "./expected"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan expected dir, does it exist?: %s", err)
 	}
 	pipes := make(map[string]bool)
-	err = processOutputPipes(func(conn *connection, pipe *Pipe) error {
+	err = processOutputPipes(conn, func(conn *connection, pipe *Pipe) error {
 		pipes[pipe.Id] = true
 		return nil
 	})
@@ -323,7 +348,7 @@ func getSpecs(update bool) ([]*testSpec, error) {
 	testedPipes := make(map[string]int)
 	for _, f := range files {
 		if strings.HasSuffix(f.Name(), ".test.json") {
-			spec, err := loadSpec(f.Name())
+			spec, err := loadSpec(conn.Basedir, f.Name())
 			if err != nil {
 				return nil, fmt.Errorf("failed to load spec %s: %s", f.Name(), err)
 			}
@@ -339,7 +364,7 @@ func getSpecs(update bool) ([]*testSpec, error) {
 			if !update {
 				return nil, fmt.Errorf("no tests references pipe %s", pipe)
 			}
-			spec, err := createMissingSpec(pipe)
+			spec, err := createMissingSpec(conn.Basedir, pipe)
 			if err != nil {
 				return nil, err
 			}
@@ -349,16 +374,16 @@ func getSpecs(update bool) ([]*testSpec, error) {
 	return specs, nil
 }
 
-func createMissingSpec(pipe string) (*testSpec, error) {
+func createMissingSpec(basedir string, pipe string) (*testSpec, error) {
 	if verboseFlag {
 		log.Printf("Creating missing placeholder test spec for pipe: %s", pipe)
 	}
-	specName := fmt.Sprintf("./expected/%s.test.json", pipe)
+	specName := filepath.Join(basedir, "expected", fmt.Sprintf("%s.test.json", pipe))
 	err := ioutil.WriteFile(specName, []byte("{\n}\n"), 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create missing spec file: %s", err)
 	}
-	spec, err := loadSpec(fmt.Sprintf("%s.test.json", pipe))
+	spec, err := loadSpec(basedir, fmt.Sprintf("%s.test.json", pipe))
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +395,7 @@ func handleSingle(conn *connection, spec *testSpec, update bool) error {
 		fmt.Printf("Running test: %s\n", spec.Id)
 	}
 	// TODO store actual output if debugFlag is enabled and tests fails
-	file := fmt.Sprintf("expected/%s", spec.File)
+	file := filepath.Join(conn.Basedir, "expected", spec.File)
 	if spec.Ignore {
 		if _, err := os.Stat(file); !os.IsNotExist(err) {
 			if update {
@@ -478,17 +503,17 @@ func handle(update bool) ([]error, error) {
 	if singlePipeFlag != "" {
 		var spec *testSpec
 		testFile := fmt.Sprintf("%s.test.json", singlePipeFlag)
-		if _, err := os.Stat(fmt.Sprintf("expected/%s", testFile)); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(conn.Basedir, "expected", testFile)); os.IsNotExist(err) {
 			if !update {
 				return nil, fmt.Errorf("no test spec: %s", testFile)
 			}
-			spec, err = createMissingSpec(singlePipeFlag)
+			spec, err = createMissingSpec(conn.Basedir, singlePipeFlag)
 
 			if err != nil {
 				return nil, err
 			}
 		}
-		spec, err = loadSpec(testFile)
+		spec, err = loadSpec(conn.Basedir, testFile)
 		if err != nil {
 			return nil, err
 		}
@@ -498,7 +523,7 @@ func handle(update bool) ([]error, error) {
 		}
 		return []error{}, nil
 	}
-	specs, err := getSpecs(update)
+	specs, err := getSpecs(conn, update)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +553,7 @@ func verify() (error) {
 		}
 		return fmt.Errorf("%d tests failed", len(errors))
 	} else {
-		fmt.Printf("All tests passed!")
+		fmt.Printf("All tests passed!\n")
 	}
 	return nil
 }
@@ -552,7 +577,7 @@ type testSpec struct {
 	Parameters        map[string]string `json:"parameters"`
 }
 
-func loadSpec(f string) (*testSpec, error) {
+func loadSpec(basedir string, f string) (*testSpec, error) {
 	// defaults
 	name := strings.TrimSuffix(f, ".test.json")
 	spec := testSpec{
@@ -561,7 +586,7 @@ func loadSpec(f string) (*testSpec, error) {
 		Endpoint: "json",
 		Pipe:   name,
 	}
-	raw, err := ioutil.ReadFile(fmt.Sprintf("./expected/%s", f))
+	raw, err := ioutil.ReadFile(filepath.Join(basedir, "expected", f))
 	if err != nil {
 		return nil, err
 	}
@@ -704,10 +729,10 @@ func download() error {
 		return fmt.Errorf("failed to get zip config, aborting: %s", err)
 	}
 
-	err = rmFiles(".", func(path string) bool {
-		return strings.HasSuffix(path, ".conf.json")
+	err = rmFiles(conn.Basedir, func(path string) (bool, error) {
+		return strings.HasSuffix(path, ".conf.json"), nil
 	})
-	err = unzipTo(tmp.Name(), ".")
+	err = unzipTo(tmp.Name(), conn.Basedir)
 	if err != nil {
 		return err
 	}
@@ -716,11 +741,11 @@ func download() error {
 }
 
 func clean() error {
-	_, err := connect()
+	conn, err := connect()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(buildDir)
+	dir := filepath.Join(conn.Basedir, buildDir)
 	err = os.RemoveAll(dir)
 	if err != nil {
 		return err
@@ -735,7 +760,7 @@ func upload() error {
 	}
 
 	profileFile := fmt.Sprintf("%s-env.json", profileFlag)
-	byte, err := ioutil.ReadFile(profileFile)
+	byte, err := ioutil.ReadFile(filepath.Join(conn.Basedir, profileFile))
 	if err != nil {
 		return fmt.Errorf("failed to load profile %s:", profileFile)
 	}
@@ -749,7 +774,7 @@ func upload() error {
 		return fmt.Errorf("failed to replace env: %s", err)
 	}
 
-	buf, err := zipConfig()
+	buf, err := zipConfig(conn.Basedir)
 
 	if dumpFlag {
 		fmt.Println("Dumping zip-")
@@ -840,7 +865,7 @@ func status() error {
 		return err
 	}
 
-	dir := filepath.Join(buildDir, "status")
+	dir := filepath.Join(conn.Basedir, buildDir, "status")
 	err = os.RemoveAll(dir)
 	if err != nil {
 		return err
@@ -849,7 +874,7 @@ func status() error {
 	local := filepath.Join(dir, "local")
 
 	err = prepDiff(local, func(dst *os.File) error {
-		buf, err := zipConfig()
+		buf, err := zipConfig(conn.Basedir)
 		if err != nil {
 			return err
 		}
@@ -883,14 +908,18 @@ func status() error {
 	return nil
 }
 
-type pathMatchFunc func(path string) bool
+type pathMatchFunc func(path string) (bool, error)
 
 func rmFiles(dir string, matcher pathMatchFunc) error {
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if info.IsDir() {
 			return nil
 		}
-		if !matcher(path) {
+		match, err := matcher(path)
+		if err != nil {
+			return nil;
+		}
+		if !match {
 			return nil
 		}
 		err = os.Remove(path)
@@ -911,19 +940,29 @@ func rmFiles(dir string, matcher pathMatchFunc) error {
 func zipDir(src string, matcher pathMatchFunc) (*bytes.Buffer, error) {
 	buf := new(bytes.Buffer)
 	w := zip.NewWriter(buf)
-
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	if extraVerboseFlag {
+		log.Printf("walking %s to find config", src);
+	}
+	err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
 		if info.IsDir() {
 			return nil
 		}
-		if !matcher(path) {
+		match, err := matcher(p);
+		if err != nil {
+			return err;
+		}
+		if !match {
 			return nil
 		}
-		f, err := w.Create(path)
+		relpath, err := filepath.Rel(src, p)
+		if err != nil {
+			return fmt.Errorf("unable to create relative zip path: %s", err);
+		}
+		f, err := w.Create(relpath)
 		if err != nil {
 			return err
 		}
-		s, err := os.Open(path)
+		s, err := os.Open(p)
 		if err != nil {
 			return err
 		}
@@ -932,7 +971,7 @@ func zipDir(src string, matcher pathMatchFunc) (*bytes.Buffer, error) {
 			return err
 		}
 		if verboseFlag {
-			log.Printf("Added %s (%d bytes written)\n", path, written)
+			log.Printf("Added %s (%d bytes written)\n", p, written)
 		}
 		return nil
 	})
@@ -985,21 +1024,24 @@ func unzipTo(src string, dst string) error {
 	return nil
 }
 
-func zipConfig() (*bytes.Buffer, error) {
-	return zipDir(".", func(path string) bool {
-		if path == "node-metadata.conf.json" {
-			return true
+func zipConfig(basedir string) (*bytes.Buffer, error) {
+	return zipDir(basedir, func(path string) (bool, error) {
+		relPath, err := filepath.Rel(basedir, path)
+		if err != nil {
+			return false, err
 		}
-		dir := filepath.Dir(path)
-		if !strings.HasPrefix(dir, "pipes") && !strings.HasPrefix(dir, "systems") {
-			return false
+		if relPath == "node-metadata.conf.json" {
+			return true, nil
 		}
-		return strings.HasSuffix(path, ".conf.json")
+		if !strings.HasPrefix(relPath, "pipes") && !strings.HasPrefix(relPath, "systems") {
+			return false, nil
+		}
+		return strings.HasSuffix(relPath, ".conf.json"), nil
 	})
 }
 
 type connection struct {
-	Jwt, Node string
+	Jwt, Node, Basedir string
 }
 
 func cleanJwt(token string) string {
@@ -1020,11 +1062,24 @@ func fixNodeUrl(url string) string {
 	}
 }
 
-func loadSyncConfig() (*os.File, error) {
+func loadSyncConfig(dir string) (*os.File, error) {
 	config := ".syncconfig"
-	file, err := os.Open(config)
+	if extraVerboseFlag {
+		fmt.Printf("Checking directory: %s\n", dir);
+	}
+	file, err := os.Open(filepath.Join(dir, config))
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("unable to open %s", config))
+		if os.IsNotExist(err) {
+			parent, _ := filepath.Split(dir)
+			if parent != "" && parent != string(os.PathSeparator) {
+				return loadSyncConfig(parent)
+			}
+			return nil, fmt.Errorf("unable to locate %s in any parent directory", config)
+		}
+		return nil, fmt.Errorf("unable to %s: %s", config, err)
+	}
+	if extraVerboseFlag {
+		fmt.Printf("Found %s in %s.\n", config, dir);
 	}
 	return file, nil
 }
@@ -1065,12 +1120,14 @@ func coalesce(list []string) string {
 	return ""
 }
 
-// loads connection from .syncconfig in current directory if not overridden by env variables
-// TODO should walk up path to find file?
-// TODO rename file to .sesam/config and use INI-style sections?
+// loads connection from .syncconfig in current directory or closest parent directory if not overridden by env variables
 func connect() (*connection, error) {
 	r := &parseResult{}
-	f, err := loadSyncConfig()
+	workDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("unable to get working directory %s", err)
+	}
+	f, err := loadSyncConfig(workDir)
 	if err == nil {
 		defer f.Close()
 		// file exists
@@ -1089,7 +1146,11 @@ func connect() (*connection, error) {
 			return nil, fmt.Errorf("jwt and node must be specifed either as parameter, os env or in config file")
 		}
 	}
-	return &connection{Jwt: cleanJwt(jwt), Node: fixNodeUrl(node)}, nil
+	baseDir := filepath.Dir(f.Name())
+	if verboseFlag {
+		fmt.Printf("Using %s as base directory.\n", baseDir)
+	}
+	return &connection{Jwt: cleanJwt(jwt), Node: fixNodeUrl(node), Basedir: baseDir}, nil
 }
 
 func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
@@ -1119,13 +1180,26 @@ func (conn *connection) doRawRequest(r *http.Request) (*http.Response, error) {
 }
 
 func assert2xx(resp *http.Response) error {
+	var debugErrorResponse = func() {
+		if extraVerboseFlag {
+			buf := new(bytes.Buffer)
+			_, err := buf.ReadFrom(resp.Body)
+			if err == nil {
+				fmt.Printf("got response body: %s", buf.String())
+			}
+		}
+	}
+
 	if resp.StatusCode == 500 {
+		debugErrorResponse();
 		return fmt.Errorf("node failed (got 500), check the node log for possible bugs? %s", resp.Status)
 	}
 	if resp.StatusCode == 403 {
+		debugErrorResponse();
 		return fmt.Errorf("failed to talk to the node (got HTTP 403 Forbidden), maybe the JWT has expired? %s", resp.Status)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		debugErrorResponse();
 		return fmt.Errorf("expected http status code 2xx, got: %d (%s)", resp.StatusCode, resp.Status)
 	}
 	return nil
@@ -1450,4 +1524,28 @@ func (conn *connection) getSystem(system string, target interface{}) error {
 	}
 	defer resp.Body.Close()
 	return json.NewDecoder(resp.Body).Decode(target)
+}
+
+func (conn *connection) getSystemLog(system string, since string, target io.Writer) error {
+	v := url.Values{}
+	if since != "" {
+		v.Add("since", since)
+	}
+	r, err := http.NewRequest("GET", fmt.Sprintf("%s/systems/%s/logs?%s", conn.Node, system, v.Encode()), nil)
+	if err != nil {
+		// shouldn't happen if connection is sane
+		return fmt.Errorf("unable to create request: %v", err)
+	}
+
+	resp, err := conn.doRequest(r)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	_, err = io.Copy(target, resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read log: %s", err);
+	}
+	return nil;
 }
