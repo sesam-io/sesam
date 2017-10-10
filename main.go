@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"github.com/beevik/etree"
 	"github.com/satori/go.uuid"
+	"crypto/tls"
 )
 
 func myUsage() {
@@ -50,6 +51,7 @@ var Version string
 
 var verboseFlag bool
 var extraVerboseFlag bool
+var skipTLSVerifyFlag bool
 var nodeFlag string
 var jwtFlag string
 var singlePipeFlag string
@@ -69,6 +71,7 @@ func main() {
 	versionPtr := flag.Bool("version", false, "print version number")
 	flag.BoolVar(&verboseFlag, "v", false, "be verbose")
 	flag.BoolVar(&extraVerboseFlag, "vv", false, "be extra verbose")
+	flag.BoolVar(&skipTLSVerifyFlag, "skip-tls-verification", false, "skip verifying the TLS certificate")
 	flag.BoolVar(&dumpFlag, "dump", false, "dump zip content to disk")
 	flag.BoolVar(&printSchedulerLogFlag, "print-scheduler-log", false, "print scheduler log during run")
 	flag.BoolVar(&customSchedulerFlag, "custom-scheduler", false,"by default a scheduler system will be added, enable this flag if you have configured a custom scheduler as part of the config")
@@ -1155,6 +1158,9 @@ func connect() (*connection, error) {
 
 func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 	resp, err := conn.doRawRequest(r)
+	if err != nil {
+		return nil, err
+	}
 	err = assert2xx(resp)
 	if err != nil {
 		return nil, err
@@ -1164,7 +1170,12 @@ func (conn *connection) doRequest(r *http.Request) (*http.Response, error) {
 
 // do request without asserting response code
 func (conn *connection) doRawRequest(r *http.Request) (*http.Response, error) {
-	client := &http.Client{}
+
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: skipTLSVerifyFlag},
+	}
+
+	client := &http.Client{Transport: tr}
 	r.Header.Add("Authorization", fmt.Sprintf("bearer %s", conn.Jwt))
 	if extraVerboseFlag {
 		log.Printf("%v: %v\n", r.Method, r.URL)
