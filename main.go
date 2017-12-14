@@ -1067,6 +1067,9 @@ func fixNodeUrl(url string) string {
 
 func loadSyncConfig(dir string) (*os.File, error) {
 	config := ".syncconfig"
+	if strings.HasSuffix(dir, string(os.PathSeparator)) {
+		dir = dir[:len(dir) - 1]
+	}
 	if extraVerboseFlag {
 		fmt.Printf("Checking directory: %s\n", dir);
 	}
