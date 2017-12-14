@@ -1152,7 +1152,10 @@ func connect() (*connection, error) {
 			return nil, fmt.Errorf("jwt and node must be specifed either as parameter, os env or in config file")
 		}
 	}
-	baseDir := filepath.Dir(f.Name())
+	baseDir := workDir
+	if f != nil {
+		baseDir = filepath.Dir(f.Name())
+	}
 	if verboseFlag {
 		fmt.Printf("Using %s as base directory.\n", baseDir)
 	}
