@@ -1312,9 +1312,7 @@ func (conn *connection) putConfig(config []interface{}) error {
 }
 
 func (conn *connection) putZipConfig(zip *bytes.Buffer) error {
-	reader := bufio.NewReader(zip)
-
-	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/config?force=true", conn.Node), reader)
+	r, err := http.NewRequest("PUT", fmt.Sprintf("%s/config?force=true", conn.Node), zip)
 	if err != nil {
 		// shouldn't happen if connection is sane
 		return fmt.Errorf("unable to create request: %v", err)
